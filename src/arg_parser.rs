@@ -13,8 +13,8 @@ pub struct Args {
     pub host: String,
 
     /// Listening port
-    #[arg(long, default_value_t = 21)]
-    pub port: u8,
+    #[arg(long, default_value_t = 8180)]
+    pub port: u16,
 }
 
 impl Args {

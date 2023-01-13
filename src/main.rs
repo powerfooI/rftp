@@ -1,33 +1,40 @@
 mod arg_parser;
-use std::{
-    io::{prelude::*, BufReader, Write},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 
-fn handle_client(mut stream: TcpStream) -> Result<(), std::io::Error> {
-    let buf_reader = BufReader::new(&mut stream);
+async fn handle_client(stream: &mut TcpStream) -> Result<(), std::io::Error> {
+    let mut content: Vec<String> = Vec::new();
+    let (rd, mut wr) = io::split(stream);
+    let buf_reader = BufReader::new(rd);
+    let mut lines = buf_reader.lines();
 
-    let buf: Vec<_> = buf_reader
-        .lines()
-        .map(|l| l.unwrap())
-        .take_while(|l| !l.is_empty())
-        .collect();
-    println!("{buf:#?}");
+    while let Some(line) = lines.next_line().await? {
+        if !line.is_empty() {
+            content.push(line);
+        }
+    }
 
-    stream.write_all(b"ok")
+    println!("{:#?}", content.clone());
+
+    wr.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
+
+    Ok(())
 }
 
-fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
     let args = arg_parser::Args::parse_args();
     println!("{args:?}");
 
-    let listener = TcpListener::bind("127.0.0.1:8180")?;
-    // accept connections and process them serially
-    for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        if let Err(e) = handle_client(stream) {
-            println!("{e}");
-        }
+    let bind_loc = format!("{}:{}", args.host, args.port);
+    let listener = TcpListener::bind(bind_loc).await?;
+    
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(&mut stream).await {
+                println!("{e}");
+            };
+        });
     }
-    Ok(())
 }
