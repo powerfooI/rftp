@@ -39,18 +39,40 @@ impl Server {
     let (tx, r) = mpsc::channel::<message::SocketMsg>(64);
     let ra = Arc::new(Mutex::new(r));
 
-    for i in 0..4 {
-      let rx = ra.clone();
-      let user_map = self.user_map.clone();
+    // for i in 0..4 {
+    //   let rx = ra.clone();
+    //   let user_map = self.user_map.clone();
 
+    //   tokio::spawn(async move {
+    //     println!("worker {} set up", i);
+    //     loop {
+    //       let mut lock = rx.lock().await;
+    //       println!("worker {} get lock", i);
+    //       let msg = lock.recv().await.unwrap();
+    //       println!("worker {}, message {:?}", i, &msg);
+    //       let mut socket = msg.socket;
+    //       println!("addr {}", &msg.addr);
+    //       if !user_map.lock().await.contains_key(&msg.addr) {
+    //         socket
+    //           .write_all(b"220 rftp.whiteffire.cn FTP server ready.")
+    //           .await
+    //           .unwrap();
+
+    //         user_map
+    //           .lock()
+    //           .await
+    //           .insert(msg.addr.clone(), user::User::new_anonymous(msg.addr));
+    //       }
+    //     }
+    //   });
+    // }
+    loop {
+      let (mut socket, addr) = self.listener.accept().await.unwrap();
+      let user_map = self.user_map.clone();
       tokio::spawn(async move {
-        println!("worker {} set up", i);
         loop {
-          let msg = rx.lock().await.recv().await.unwrap();
-          println!("worker {}, message {:?}", i, &msg);
-          let mut socket = msg.socket;
-          println!("addr {}", &msg.addr);
-          if !user_map.lock().await.contains_key(&msg.addr) {
+          println!("addr {}", addr);
+          if !user_map.lock().await.contains_key(&addr) {
             socket
               .write_all(b"220 rftp.whiteffire.cn FTP server ready.")
               .await
@@ -59,30 +81,26 @@ impl Server {
             user_map
               .lock()
               .await
-              .insert(msg.addr.clone(), user::User::new_anonymous(msg.addr));
+              .insert(addr.clone(), user::User::new_anonymous(addr));
+          }
+
+          loop {
+            let mut buf = vec![0; 2048];
+    
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+              return;
+            }
+            let req = String::from_utf8(buf).unwrap();
+            println!("[Request] {}", &req);
           }
         }
       });
-    }
-    loop {
-      let (socket, addr) = self.listener.accept().await.unwrap();
-      // tx.send(message::SocketMsg { socket, addr });
-      let mut socket = socket;
-      println!("addr {}", &addr);
-      tokio::spawn(async move {
-
-      });
-      if !self.user_map.lock().await.contains_key(&addr) {
-        socket
-          .write_all(b"220 rftp.whiteffire.cn FTP server ready.")
-          .await
-          .unwrap();
-
-        self.user_map
-          .lock()
-          .await
-          .insert(addr.clone(), user::User::new_anonymous(addr));
-      }
+      // tx.send(message::SocketMsg {
+      //   socket: Box::new(socket),
+      //   // connection reset by peer
+      //   addr,
+      // });
     }
   }
 

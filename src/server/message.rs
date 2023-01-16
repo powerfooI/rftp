@@ -1,11 +1,9 @@
 use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{WriteHalf, ReadHalf, BufReader, BufWriter};
-use std::sync::{Arc};
-use tokio::sync::{Mutex};
+use tokio::net::{TcpStream};
 
+/// deprecated
 #[derive(Debug)]
 pub struct SocketMsg {
-  pub socket: TcpStream,
+  pub socket: Box<TcpStream>,
   pub addr: SocketAddr,
 }
