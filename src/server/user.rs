@@ -26,6 +26,7 @@ pub struct User {
   pub username: String,
   pub status: UserStatus,
   pub addr: SocketAddr,
+  pub pwd: String,
   pub sessions: HashMap<SocketAddr, TransferSession>,
 }
 
@@ -35,6 +36,7 @@ impl User {
       addr,
       username,
       sessions: HashMap::new(),
+      pwd: String::from("/"),
       status: UserStatus::Logging,
     }
   }
@@ -44,6 +46,7 @@ impl User {
       status: UserStatus::Active,
       username: String::from("anonymous"),
       sessions: HashMap::new(),
+      pwd: String::from("/"),
     }
   }
 }

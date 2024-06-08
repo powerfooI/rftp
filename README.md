@@ -10,12 +10,12 @@
 * `ABOR/QUIT`
 * `SYST/TYPE`
 * `RNFR/RNTO`
+* `PWD/CWD/MKD/RMD`
 * `LIST`
 
 ### Advanced Commands
 
 * `REST`
-* `PWD/CWD/MKD/RMD`
 * `DELE`
 * `STAT`
 * `STOU`
