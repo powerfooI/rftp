@@ -14,8 +14,8 @@ async fn main() -> Result<()> {
   let read_task = tokio::spawn(async move {
     loop {
       let mut input = String::new();
-      stdin().read_line(&mut input).unwrap();
-      wr.write_all(input.as_bytes()).await.unwrap();
+      let n = stdin().read_line(&mut input).unwrap();
+      wr.write_all(&input.as_bytes()[..n]).await.unwrap();
     }
   });
 
