@@ -1,4 +1,9 @@
 use std::{net::SocketAddr, collections::HashMap};
+use tokio::net::{TcpListener, TcpStream};
+use std::cell::RefCell;
+use std::sync::{Arc};
+use tokio::sync::Mutex;
+
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -9,8 +14,8 @@ pub enum UserStatus {
 
 #[derive(Debug)]
 pub enum TransferMode {
-  Port(SocketAddr),
-  Passive(SocketAddr),
+  Port(Mutex<TcpStream>),
+  Passive(TcpListener),
 }
 
 #[derive(Debug)]
@@ -36,7 +41,7 @@ impl User {
       addr,
       username,
       sessions: HashMap::new(),
-      pwd: String::from("/"),
+      pwd: String::from("./"),
       status: UserStatus::Logging,
     }
   }
@@ -46,7 +51,7 @@ impl User {
       status: UserStatus::Active,
       username: String::from("anonymous"),
       sessions: HashMap::new(),
-      pwd: String::from("/"),
+      pwd: String::from("./"),
     }
   }
 }

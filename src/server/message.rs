@@ -43,7 +43,7 @@ pub enum FtpCommand {
   USER(String),
   PASS(String),
   PORT(SocketAddr),
-  PASV(SocketAddr),
+  PASV,
   RETR(String),
   STOR(String),
   ABOR,
@@ -65,12 +65,15 @@ pub enum FtpCommand {
   STOU,
   APPE(String),
   ALLO(u64),
+  NOOP,
+  FEAT,
 }
 
 pub fn parse_command(req: String) -> FtpCommand {
+  let req = req.trim();
   let mut iter = req.split_whitespace();
   let cmd = iter.next().unwrap();
-  let arg = iter.next().unwrap();
+  let arg = iter.collect::<Vec<&str>>().join(" ");
   match cmd {
     "USER" => FtpCommand::USER(arg.to_string()),
     "PASS" => FtpCommand::PASS(arg.to_string()),
@@ -84,11 +87,7 @@ pub fn parse_command(req: String) -> FtpCommand {
       FtpCommand::PORT(addr.parse().unwrap())
     }
     "PASV" => {
-      let mut iter = arg.split(',');
-      let ip = iter.by_ref().take(4).collect::<Vec<&str>>().join(".");
-      let port = iter.take(2).collect::<Vec<&str>>().join(".");
-      let addr = format!("{}:{}", ip, port);
-      FtpCommand::PASV(addr.parse().unwrap())
+      FtpCommand::PASV
     }
     "RETR" => FtpCommand::RETR(arg.to_string()),
     "STOR" => FtpCommand::STOR(arg.to_string()),
@@ -115,6 +114,10 @@ pub fn parse_command(req: String) -> FtpCommand {
     "STOU" => FtpCommand::STOU,
     "APPE" => FtpCommand::APPE(arg.to_string()),
     "ALLO" => FtpCommand::ALLO(arg.parse().unwrap()),
-    _ => FtpCommand::USER("anonymous".to_string()),
+    "FEAT" => FtpCommand::FEAT,
+    _ => {
+      println!("Unknown command: {}, Args: {}", cmd, arg);
+      FtpCommand::NOOP
+    },
   }
 }
