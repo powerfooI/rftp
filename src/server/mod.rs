@@ -205,12 +205,64 @@ impl Server {
         current_user.pwd
       )),
       message::FtpCommand::CWD(dir) => {
-        current_user.pwd = dir;
-        Ok("250 Requested file action okay, completed.\r\n".to_string())
+        if let Ok(new_path) = Path::new(&self.root)
+          .join(&current_user.pwd)
+          .join(&dir)
+          .canonicalize()
+        {
+          if !new_path.starts_with(&self.root) {
+            return Ok("550 Permission denied.\r\n".to_string());
+          }
+          if !new_path.starts_with(&self.root) {
+            return Ok("550 Permission denied.\r\n".to_string());
+          }
+          current_user.pwd = Path::new(&current_user.pwd)
+            .join(dir)
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+            .replace(&self.root, ".");
+          Ok("250 Requested file action okay, completed.\r\n".to_string())
+        } else {
+          return Ok("550 Permission denied.\r\n".to_string());
+        }
       }
-      message::FtpCommand::MKD(dir) => Ok("257 Directory created.\r\n".to_string()),
+      message::FtpCommand::MKD(dir) => {
+        // let parts = current_user.pwd.split("/").collect();
+        match fs::create_dir(Path::new(&self.root)
+        .join(&current_user.pwd)
+        .join(&dir)) {
+          Ok(_) => {
+            Ok("257 Directory created.\r\n".to_string())
+          },
+          Err(e) => {
+            println!("Error: {:?}", e);
+            Ok("550 Permission denied.\r\n".to_string())
+          },
+        }
+      }
       message::FtpCommand::RMD(dir) => {
-        Ok("250 Requested file action okay, completed.\r\n".to_string())
+        if let Ok(new_path) = Path::new(&self.root)
+          .join(&current_user.pwd)
+          .join(&dir)
+          .canonicalize()
+        {
+          if !new_path.starts_with(&self.root) {
+            return Ok("550 Permission denied.\r\n".to_string());
+          }
+          if !new_path.exists() {
+            return Ok("550 Permission denied.\r\n".to_string());
+          }
+          if let Ok(_) = fs::remove_dir(new_path) {
+            Ok("250 Requested file action okay, completed.\r\n".to_string())
+          } else {
+            Ok("550 Permission denied.\r\n".to_string())
+          }
+        } else {
+          Ok("550 Permission denied.\r\n".to_string())
+        }
       }
       message::FtpCommand::LIST(optional_dir) => {
         let path = match optional_dir {
@@ -254,7 +306,7 @@ impl Server {
             file_type, permission, file_size, file_time, file_name
           ));
         }
-        println!("List: \n{}", list);
+        // println!("List: \n{}", list);
         Ok(format!(
           "150 Opening ASCII mode data connection for file list\n{}226 Transfer complete\r\n",
           list

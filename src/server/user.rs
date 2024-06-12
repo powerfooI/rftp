@@ -41,7 +41,7 @@ impl User {
       addr,
       username,
       sessions: HashMap::new(),
-      pwd: String::from("./"),
+      pwd: String::from("."),
       status: UserStatus::Logging,
     }
   }
@@ -51,7 +51,7 @@ impl User {
       status: UserStatus::Active,
       username: String::from("anonymous"),
       sessions: HashMap::new(),
-      pwd: String::from("./"),
+      pwd: String::from("."),
     }
   }
 }
