@@ -1,21 +1,21 @@
-use chrono::{DateTime, Local};
-use std::borrow::Borrow;
+use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-pub mod message;
+pub mod commands;
+pub mod ftp;
 pub mod user;
 
-use crate::arg_parser::Args;
+use commands::FtpCommand;
+use ftp::FtpServer;
+use user::{TransferSession, User};
 
-use self::user::TransferSession;
+use crate::arg_parser::Args;
 
 #[derive(Debug, Clone)]
 pub struct Server {
@@ -23,7 +23,7 @@ pub struct Server {
   pub port: u16,
   pub root: String,
   pub listener: Arc<Mutex<TcpListener>>,
-  pub user_map: Arc<Mutex<HashMap<SocketAddr, user::User>>>,
+  pub user_map: Arc<Mutex<HashMap<SocketAddr, Arc<Mutex<User>>>>>,
   pub data_map: Arc<Mutex<HashMap<u16, TransferSession>>>,
 }
 
@@ -72,266 +72,128 @@ impl Server {
         .write_all(b"220 rftp.whiteffire.cn FTP server ready.\r\n")
         .await
         .unwrap();
-      user_map
-        .lock()
-        .await
-        .insert(addr.clone(), user::User::new_anonymous(addr));
+      user_map.lock().await.insert(
+        addr.clone(),
+        Arc::new(Mutex::new(User::new_anonymous(addr))),
+      );
     }
+    let guard = Arc::new(Mutex::new(socket));
     loop {
       let mut buf = vec![0; 2048];
+      let cloned = guard.clone();
+      let req = {
+        let mut stream = cloned.lock().await;
+        let n = stream.read(&mut buf).await.unwrap();
+        if n == 0 {
+          return;
+        }
+        String::from_utf8_lossy(&buf[..n]).to_string()
+      };
 
-      let n = socket.read(&mut buf).await.unwrap();
-      if n == 0 {
-        return;
-      }
-      let req = String::from_utf8_lossy(&buf[..n]).to_string();
-      let resp = self.dispatch(req, addr).await.unwrap();
-      socket.write_all(resp.as_bytes()).await.unwrap();
+      self.dispatch(cloned, req, addr).await;
       // socket.flush().await.unwrap();
     }
   }
 
-  async fn dispatch(&self, req: String, addr: SocketAddr) -> Result<String, io::Error> {
-    let cmd = message::parse_command(req);
+  async fn dispatch(&self, control: Arc<Mutex<TcpStream>>, req: String, addr: SocketAddr) {
+    let cmd = commands::parse_command(req);
     println!("Addr: {}, Cmd: {:?}", addr, cmd);
+
     let user_map = self.user_map.clone();
     let mut user_map = user_map.lock().await;
     let current_user = user_map.get_mut(&addr).unwrap();
+    let cloned_user = current_user.clone();
+    let mut locking_user = current_user.lock().await;
+    let locking_user = locking_user.borrow_mut();
+
+    let mut control_stream = control.lock().await;
+    let control_stream = control_stream.borrow_mut();
+
     match cmd {
-      message::FtpCommand::USER(username) => {
-        current_user.username = username;
-        current_user.status = user::UserStatus::Logging;
-        Ok("331 User name okay, need password.\r\n".to_string())
+      FtpCommand::USER(username) => {
+        self.user(control_stream, locking_user, username).await;
       }
-      message::FtpCommand::PASS(_) => {
-        if current_user.username == "anonymous" {
-          current_user.status = user::UserStatus::Active;
-          Ok("230 User logged in, proceed.\r\n".to_string())
-        } else {
-          Ok("530 Not logged in.\r\n".to_string())
-        }
+      FtpCommand::PASS(pwd) => {
+        self.pass(control_stream, locking_user, pwd).await;
       }
-      message::FtpCommand::PORT(addr) => {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        current_user.sessions.insert(
-          addr,
-          TransferSession {
-            mode: user::TransferMode::Port(Mutex::new(stream)),
-            total_size: 0,
-            finished_size: 0,
-            file_name: String::new(),
-          },
-        );
-        Ok("200 PORT command successful.\r\n".to_string())
+      FtpCommand::PORT(addr) => {
+        self.port_mode(control_stream, locking_user, addr).await;
       }
-      message::FtpCommand::PASV => {
-        let listener = self.generate_pasv_addr().await.unwrap();
-        let addr_str = listener
-          .local_addr()
-          .unwrap_or(SocketAddr::from_str(format!("{}:{}", self.host, self.port).as_str()).unwrap())
-          .ip()
-          .to_string()
-          .replace(".", ",");
-        let port = addr.port();
-        current_user.sessions.insert(
-          listener.local_addr().unwrap(),
-          TransferSession {
-            mode: user::TransferMode::Passive(listener),
-            total_size: 0,
-            finished_size: 0,
-            file_name: String::new(),
-          },
-        );
-        Ok(format!(
-          "227 Entering Passive Mode ({},{},{})\r\n",
-          addr_str,
-          port / 256,
-          port % 256,
-        ))
+      FtpCommand::PASV => {
+        self.passive_mode(control_stream, cloned_user).await;
       }
-      message::FtpCommand::RETR(file_name) => {
-        if let Some(session) = current_user.sessions.get_mut(&addr) {
-          session.file_name = file_name.clone();
-          // Path join self.root, current_user.pwd, file_name
-          let path = Path::new(&self.root)
-            .join(&current_user.pwd)
-            .join(file_name);
-          if !Path::exists(&path) {
-            return Ok("550 File not found.\r\n".to_string());
-          }
-          match session.mode.borrow() {
-            user::TransferMode::Port(stream) => {
-              let file = fs::read(path).unwrap();
-              stream.lock().await.write_all(&file).await.unwrap();
-            }
-            user::TransferMode::Passive(listener) => {
-              let (mut stream, _) = listener.accept().await.unwrap();
-              let file = fs::read(path).unwrap();
-              stream.write_all(&file).await.unwrap();
-            }
-          }
-        } else {
-          return Ok("425 Can't open data connection.\r\n".to_string());
-        }
-        Ok("150 File status okay; about to open data connection.\r\n".to_string())
+      FtpCommand::RETR(file_name) => {
+        self.retrieve(control_stream, locking_user, file_name).await;
       }
-      message::FtpCommand::STOR(file_name) => {
-        let session = current_user.sessions.get_mut(&addr).unwrap();
-        session.file_name = file_name;
-        Ok("150 File status okay; about to open data connection.\r\n".to_string())
+      FtpCommand::STOR(file_name) => {
+        self.store(control_stream, locking_user, file_name).await;
       }
-      message::FtpCommand::ABOR => {
-        current_user.status = user::UserStatus::Active;
-        Ok("200 ABOR command successful.\r\n".to_string())
+      FtpCommand::ABOR => {
+        self.abort(control_stream, locking_user).await;
       }
-      message::FtpCommand::QUIT => {
-        user_map.remove(&addr);
-        Ok("221 Goodbye.\r\n".to_string())
+      FtpCommand::QUIT => {
+        self.quit(control_stream, locking_user).await;
       }
-      message::FtpCommand::SYST => Ok("215 UNIX Type: L8\r\n".to_string()),
-      message::FtpCommand::TYPE => Ok("200 Type set to I\r\n.".to_string()),
-      message::FtpCommand::RNFR(file_name) => {
-        let session = current_user.sessions.get_mut(&addr).unwrap();
-        session.file_name = file_name;
-        Ok("350 Requested file action pending further information.\r\n".to_string())
+      FtpCommand::SYST => {
+        self.system_info(control_stream, locking_user).await;
       }
-      message::FtpCommand::RNTO(file_name) => {
-        let session = current_user.sessions.get_mut(&addr).unwrap();
-        session.file_name = file_name;
-        Ok("250 Requested file action okay, completed.\r\n".to_string())
+      FtpCommand::TYPE(type_) => {
+        self.set_type(control_stream, locking_user, type_).await;
       }
-      message::FtpCommand::PWD => Ok(format!(
-        "257 \"{}\" is the current directory.\r\n",
-        current_user.pwd
-      )),
-      message::FtpCommand::CWD(dir) => {
-        if let Ok(new_path) = Path::new(&self.root)
-          .join(&current_user.pwd)
-          .join(&dir)
-          .canonicalize()
-        {
-          if !new_path.starts_with(&self.root) {
-            return Ok("550 Permission denied.\r\n".to_string());
-          }
-          if !new_path.starts_with(&self.root) {
-            return Ok("550 Permission denied.\r\n".to_string());
-          }
-          current_user.pwd = Path::new(&current_user.pwd)
-            .join(dir)
-            .canonicalize()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string()
-            .replace(&self.root, ".");
-          Ok("250 Requested file action okay, completed.\r\n".to_string())
-        } else {
-          return Ok("550 Permission denied.\r\n".to_string());
-        }
+      FtpCommand::RNFR(file_name) => {
+        self
+          .rename_from(control_stream, locking_user, file_name)
+          .await;
       }
-      message::FtpCommand::MKD(dir) => {
-        // let parts = current_user.pwd.split("/").collect();
-        match fs::create_dir(Path::new(&self.root)
-        .join(&current_user.pwd)
-        .join(&dir)) {
-          Ok(_) => {
-            Ok("257 Directory created.\r\n".to_string())
-          },
-          Err(e) => {
-            println!("Error: {:?}", e);
-            Ok("550 Permission denied.\r\n".to_string())
-          },
-        }
+      FtpCommand::RNTO(file_name) => {
+        self
+          .rename_to(control_stream, locking_user, file_name)
+          .await;
       }
-      message::FtpCommand::RMD(dir) => {
-        if let Ok(new_path) = Path::new(&self.root)
-          .join(&current_user.pwd)
-          .join(&dir)
-          .canonicalize()
-        {
-          if !new_path.starts_with(&self.root) {
-            return Ok("550 Permission denied.\r\n".to_string());
-          }
-          if !new_path.exists() {
-            return Ok("550 Permission denied.\r\n".to_string());
-          }
-          if let Ok(_) = fs::remove_dir(new_path) {
-            Ok("250 Requested file action okay, completed.\r\n".to_string())
-          } else {
-            Ok("550 Permission denied.\r\n".to_string())
-          }
-        } else {
-          Ok("550 Permission denied.\r\n".to_string())
-        }
+      FtpCommand::PWD => {
+        self.pwd(control_stream, locking_user).await;
       }
-      message::FtpCommand::LIST(optional_dir) => {
-        let path = match optional_dir {
-          Some(path) => Path::new(&self.root).join(&current_user.pwd).join(path),
-          None => Path::new(&self.root).join(&current_user.pwd),
-        };
-        let path = path.canonicalize().unwrap();
-        if !path.starts_with(&self.root) {
-          return Ok("550 Permission denied.\r\n".to_string());
-        }
-        let mut files = fs::read_dir(path).unwrap();
-        let mut list = String::new();
-        // https://files.stairways.com/other/ftp-list-specs-info.txt
-        // http://cr.yp.to/ftp/list/binls.html
-        while let Some(file) = files.next() {
-          let file = file.unwrap();
-          let metadata = file.metadata().unwrap();
-          let file_name = file.file_name().into_string().unwrap();
-          let file_type = if metadata.is_dir() { "d" } else { "-" };
-          let file_size = metadata.len();
-          let file_size = format!("{:>13}", file_size);
-          let file_time = file
-            .metadata()
-            .unwrap()
-            .modified()
-            .unwrap()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap();
-          let file_time = DateTime::from_timestamp(file_time.as_secs() as i64, 0)
-            .unwrap()
-            .with_timezone(&Local)
-            .format("%b %d %H:%M")
-            .to_string();
-          let permission = if metadata.is_dir() {
-            "rwxr-xr-x"
-          } else {
-            "rw-r--r--"
-          };
-          list.push_str(&format!(
-            "{}{} 1 owner group {} {} {}\n",
-            file_type, permission, file_size, file_time, file_name
-          ));
-        }
-        // println!("List: \n{}", list);
-        Ok(format!(
-          "150 Opening ASCII mode data connection for file list\n{}226 Transfer complete\r\n",
-          list
-        ))
+      FtpCommand::CWD(dir_name) => {
+        self.cwd(control_stream, locking_user, dir_name).await;
       }
-      message::FtpCommand::REST => {
-        Ok("350 Requested file action pending further information.\r\n".to_string())
+      FtpCommand::MKD(dir_name) => {
+        self.make_dir(control_stream, locking_user, dir_name).await;
       }
-      message::FtpCommand::DELE(file_name) => {
-        let session = current_user.sessions.get_mut(&addr).unwrap();
-        session.file_name = file_name;
-        Ok("250 Requested file action okay, completed.\r\n".to_string())
+      FtpCommand::RMD(dir_name) => {
+        self
+          .remove_dir(control_stream, locking_user, dir_name)
+          .await;
       }
-      message::FtpCommand::STAT => Ok("211 End.\r\n".to_string()),
-      message::FtpCommand::STOU => {
-        Ok("202 Command not implemented, superfluous at this site.\r\n".to_string())
+      FtpCommand::LIST(optional_dir) => {
+        self.list(control_stream, locking_user, optional_dir).await;
       }
-      message::FtpCommand::APPE(file_name) => {
-        let session = current_user.sessions.get_mut(&addr).unwrap();
-        session.file_name = file_name;
-        Ok("150 File status okay; about to open data connection.\r\n".to_string())
+      FtpCommand::REST => {
+        self.restart(control_stream, locking_user).await;
       }
-      message::FtpCommand::ALLO(_) => Ok("200 Command okay.\r\n".to_string()),
-      message::FtpCommand::NOOP => Ok("200 NOOP ok.\r\n".to_string()),
-      message::FtpCommand::FEAT => Ok("211-Features:\nPASV\n211 End.\r\n".to_string()),
+      FtpCommand::DELE(file_name) => {
+        self.delete(control_stream, locking_user, file_name).await;
+      }
+      FtpCommand::STAT => {
+        self.status(control_stream, locking_user).await;
+      }
+      FtpCommand::STOU => {
+        self.store_unique(control_stream, locking_user).await;
+      }
+      FtpCommand::APPE(file_name) => {
+        self.append(control_stream, locking_user, file_name).await;
+      }
+      FtpCommand::ALLO(size) => {
+        self.allocate(control_stream, locking_user, size).await;
+      }
+      FtpCommand::NOOP => {
+        self.noop(control_stream, locking_user).await;
+      }
+      FtpCommand::FEAT => {
+        self.feat(control_stream, locking_user).await;
+      }
+      FtpCommand::CDUP => {
+        self.cd_up(control_stream, locking_user).await;
+      }
     }
   }
 

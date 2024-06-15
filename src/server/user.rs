@@ -1,9 +1,6 @@
-use std::{net::SocketAddr, collections::HashMap};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use std::cell::RefCell;
-use std::sync::{Arc};
 use tokio::sync::Mutex;
-
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -15,7 +12,7 @@ pub enum UserStatus {
 #[derive(Debug)]
 pub enum TransferMode {
   Port(Mutex<TcpStream>),
-  Passive(TcpListener),
+  Passive(Mutex<TcpStream>),
 }
 
 #[derive(Debug)]
