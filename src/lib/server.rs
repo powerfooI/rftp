@@ -1,4 +1,4 @@
-
+use crate::arg_parser::Args;
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -7,11 +7,11 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use crate::arg_parser::Args;
 
 use crate::lib::commands::{parse_command, FtpCommand};
 use crate::lib::ftp::FtpServer;
-use crate::lib::user::{TransferSession, User};
+use crate::lib::session::TransferSession;
+use crate::lib::user::User;
 
 #[derive(Debug, Clone)]
 pub struct Server {
@@ -31,8 +31,7 @@ impl Server {
       host: cfg.host,
       port: cfg.port,
       root: Path::new(cfg.folder.as_str())
-        .canonicalize()
-        .unwrap()
+        .canonicalize()?
         .to_str()
         .unwrap()
         .to_string(),
@@ -42,7 +41,6 @@ impl Server {
     })
   }
 
-  #[allow(unused_must_use)]
   pub async fn listen(&self) {
     println!("Listening on {}:{}", self.host, self.port);
     println!("Root folder: {}", self.root);
@@ -79,13 +77,19 @@ impl Server {
       let cloned = guard.clone();
       let req = {
         let mut stream = cloned.lock().await;
-        let n = stream.read(&mut buf).await.unwrap();
-        if n == 0 {
-          return;
-        }
+        let n = match stream.read(&mut buf).await {
+          Ok(n) => n,
+          Err(_) => {
+            println!("Connection closed: {}", addr);
+            user_map.lock().await.remove(&addr);
+            return;
+          }
+        };
         String::from_utf8_lossy(&buf[..n]).to_string()
       };
-
+      if req.is_empty() {
+        continue;
+      }
       self.dispatch(cloned, req, addr).await;
       // socket.flush().await.unwrap();
     }
@@ -116,7 +120,9 @@ impl Server {
         self.port_mode(control_stream, locking_user, addr).await;
       }
       FtpCommand::PASV => {
-        self.passive_mode(control_stream, locking_user, cloned_user).await;
+        self
+          .passive_mode(control_stream, locking_user, cloned_user)
+          .await;
       }
       FtpCommand::RETR(file_name) => {
         self.retrieve(control_stream, locking_user, file_name).await;
@@ -169,8 +175,10 @@ impl Server {
       FtpCommand::DELE(file_name) => {
         self.delete(control_stream, locking_user, file_name).await;
       }
-      FtpCommand::STAT => {
-        self.status(control_stream, locking_user).await;
+      FtpCommand::STAT(optional_path) => {
+        self
+          .status(control_stream, locking_user, optional_path)
+          .await;
       }
       FtpCommand::STOU => {
         self.store_unique(control_stream, locking_user).await;

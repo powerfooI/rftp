@@ -9,6 +9,10 @@ ftp.login("anonymous", "uuu@")
 
 ftp.pwd()
 
+ftp.cwd("/")
+
+ftp.pwd()
+
 ftp.mkd("test2")
 
 ftp.cwd("test2")
@@ -22,6 +26,8 @@ ftp.rmd("test2")
 ftp.retrbinary('RETR test.txt', open('test.txt', 'wb').write)
 
 ftp.storbinary('STOR test-store.txt', open('test.txt', 'rb'))
+
+ftp.retrlines('LIST test1.txt')
 
 ftp.retrlines('LIST')
 

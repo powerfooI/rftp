@@ -1,6 +1,5 @@
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use crate::lib::session::TransferSession;
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -10,17 +9,9 @@ pub enum UserStatus {
 }
 
 #[derive(Debug)]
-pub enum TransferMode {
-  Port(Mutex<TcpStream>),
-  Passive(Mutex<TcpStream>),
-}
-
-#[derive(Debug)]
-pub struct TransferSession {
-  pub mode: TransferMode,
-  pub total_size: u64,
-  pub finished_size: u64,
-  pub file_name: String,
+pub enum TransferType {
+  ASCII,
+  Binary,
 }
 
 #[derive(Debug)]
@@ -30,6 +21,7 @@ pub struct User {
   pub addr: SocketAddr,
   pub pwd: String,
   pub sessions: HashMap<SocketAddr, TransferSession>,
+  pub trans_type: TransferType,
 }
 
 impl User {
@@ -40,6 +32,7 @@ impl User {
       sessions: HashMap::new(),
       pwd: String::from("."),
       status: UserStatus::Logging,
+      trans_type: TransferType::ASCII,
     }
   }
   pub fn new_anonymous(addr: SocketAddr) -> Self {
@@ -49,6 +42,7 @@ impl User {
       username: String::from("anonymous"),
       sessions: HashMap::new(),
       pwd: String::from("."),
+      trans_type: TransferType::ASCII,
     }
   }
 }
