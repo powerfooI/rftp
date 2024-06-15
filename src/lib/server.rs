@@ -1,3 +1,4 @@
+
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -6,16 +7,11 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-
-pub mod commands;
-pub mod ftp;
-pub mod user;
-
-use commands::FtpCommand;
-use ftp::FtpServer;
-use user::{TransferSession, User};
-
 use crate::arg_parser::Args;
+
+use crate::lib::commands::{parse_command, FtpCommand};
+use crate::lib::ftp::FtpServer;
+use crate::lib::user::{TransferSession, User};
 
 #[derive(Debug, Clone)]
 pub struct Server {
@@ -96,7 +92,7 @@ impl Server {
   }
 
   async fn dispatch(&self, control: Arc<Mutex<TcpStream>>, req: String, addr: SocketAddr) {
-    let cmd = commands::parse_command(req);
+    let cmd = parse_command(req);
     println!("Addr: {}, Cmd: {:?}", addr, cmd);
 
     let user_map = self.user_map.clone();
@@ -120,7 +116,7 @@ impl Server {
         self.port_mode(control_stream, locking_user, addr).await;
       }
       FtpCommand::PASV => {
-        self.passive_mode(control_stream, cloned_user).await;
+        self.passive_mode(control_stream, locking_user, cloned_user).await;
       }
       FtpCommand::RETR(file_name) => {
         self.retrieve(control_stream, locking_user, file_name).await;
@@ -197,7 +193,7 @@ impl Server {
     }
   }
 
-  async fn generate_pasv_addr(&self) -> Option<TcpListener> {
+  pub async fn generate_pasv_addr(&self) -> Option<TcpListener> {
     for port in 49152..65535 {
       let addr = format!("{}:{}", self.host, port);
       if let Ok(addr) = addr.parse::<SocketAddr>() {

@@ -1,16 +1,17 @@
 use chrono::{DateTime, Local};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
 use std::{net::SocketAddr, sync::Arc};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 
 use self::user::{TransferSession, User, UserStatus};
-use crate::server::{user, Server};
+use crate::lib::{server::Server, user};
 
 #[async_trait]
 pub trait FtpServer {
@@ -23,7 +24,7 @@ pub trait FtpServer {
   async fn cwd(&self, control: &mut TcpStream, user: &mut User, dir_name: String);
   async fn pwd(&self, control: &mut TcpStream, user: &mut User);
   async fn set_type(&self, control: &mut TcpStream, user: &mut User, type_: String);
-  async fn passive_mode(&self, control: &mut TcpStream, user: Arc<Mutex<User>>);
+  async fn passive_mode(&self, control: &mut TcpStream, user: &mut User, user_ref: Arc<Mutex<User>>);
   async fn port_mode(&self, control: &mut TcpStream, user: &mut User, port_addr: SocketAddr);
   async fn quit(&self, control: &mut TcpStream, user: &mut User);
   async fn noop(&self, control: &mut TcpStream, user: &mut User);
@@ -147,9 +148,34 @@ impl FtpServer for Server {
   async fn store(&self, control: &mut TcpStream, user: &mut User, file_name: String) {
     let addr = user.addr;
     let session = user.sessions.get_mut(&addr).unwrap();
-    session.file_name = file_name;
+    session.file_name = file_name.clone();
+    let mut data_stream = match &session.mode {
+      user::TransferMode::Port(stream) => stream.lock().await,
+      user::TransferMode::Passive(stream) => stream.lock().await,
+    };
+    let target_path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+    let mut file = fs::File::create(target_path).unwrap();
     control
-      .write_all(b"150 File status okay; about to open data connection.\r\n")
+      .write_all(
+        format!(
+          "150 Opening BINARY mode data connection for {}.\r\n",
+          file_name
+        )
+        .as_bytes(),
+      )
+      .await
+      .unwrap();
+    loop {
+      let mut buf = vec![0; 1024];
+      let n = data_stream.read(&mut buf).await.unwrap();
+      if n == 0 {
+        break;
+      }
+      file.write_all(&buf[..n]).unwrap();
+    }
+
+    control
+      .write_all(b"226 Transfer complete.\r\n")
       .await
       .unwrap();
   }
@@ -173,39 +199,46 @@ impl FtpServer for Server {
     }
   }
   async fn remove_dir(&self, control: &mut TcpStream, user: &mut User, dir_name: String) {
-    if let Ok(new_path) = Path::new(&self.root)
-      .join(&user.pwd)
-      .join(&dir_name)
-      .canonicalize()
-    {
-      if !new_path.starts_with(&self.root) {
-        control
-          .write_all(b"550 Permission denied.\r\n")
-          .await
-          .unwrap();
-      }
-      if !new_path.exists() {
-        control
-          .write_all(b"550 Permission denied.\r\n")
-          .await
-          .unwrap();
-      }
-      if let Ok(_) = fs::remove_dir(new_path) {
-        control
-          .write_all(b"250 Requested file action okay, completed.\r\n")
-          .await
-          .unwrap();
-      } else {
-        control
-          .write_all(b"550 Permission denied.\r\n")
-          .await
-          .unwrap();
-      }
-    } else {
-      control
-        .write_all(b"550 Permission denied.\r\n")
-        .await
-        .unwrap();
+    println!("Remove dir: {:?}", dir_name);
+    println!("User pwd: {:?}", user.pwd);
+    match Path::new(&self.root)
+    .join(&user.pwd)
+    .join(&dir_name)
+    .canonicalize() {
+        Ok(new_path) => {
+          {
+            if !new_path.starts_with(&self.root) {
+              control
+                .write_all(b"550 Permission denied.\r\n")
+                .await
+                .unwrap();
+            }
+            if !new_path.exists() {
+              control
+                .write_all(b"553 Not found.\r\n")
+                .await
+                .unwrap();
+            }
+            if let Ok(_) = fs::remove_dir(new_path) {
+              control
+                .write_all(b"200 Remove completed.\r\n")
+                .await
+                .unwrap();
+            } else {
+              control
+                .write_all(b"550 Failed to remove directory.\r\n")
+                .await
+                .unwrap();
+            }
+          } 
+        }
+        Err(e) => {
+          println!("Error: {:?}", e);
+          control
+            .write_all(b"550 Path error.\r\n")
+            .await
+            .unwrap();
+        }
     }
   }
   async fn delete(&self, control: &mut TcpStream, user: &mut User, file_name: String) {
@@ -261,9 +294,8 @@ impl FtpServer for Server {
   async fn set_type(&self, control: &mut TcpStream, _: &mut User, _: String) {
     control.write_all(b"200 Type set to I.\r\n").await.unwrap()
   }
-  async fn passive_mode(&self, control: &mut TcpStream, user: Arc<Mutex<User>>) {
-    let cloned = user.clone();
-    let user = user.lock().await;
+  async fn passive_mode(&self, control: &mut TcpStream, user: &mut User, user_ref: Arc<Mutex<User>>) {
+    let cloned = user_ref.clone();
     let addr = user.addr;
     let listener = self.generate_pasv_addr().await.unwrap();
     let listen_addr = listener
@@ -271,6 +303,19 @@ impl FtpServer for Server {
       .unwrap_or(SocketAddr::from_str(format!("{}:{}", self.host, self.port).as_str()).unwrap());
     let ip = listen_addr.ip().to_string().replace(".", ",");
     let port = listen_addr.port();
+
+    control
+      .write_all(
+        format!(
+          "227 Entering Passive Mode ({},{},{})\r\n",
+          ip,
+          port / 256,
+          port % 256,
+        )
+        .as_bytes(),
+      )
+      .await
+      .unwrap();
 
     tokio::spawn(async move {
       let (stream, _) = listener.accept().await.unwrap();
@@ -285,23 +330,11 @@ impl FtpServer for Server {
       );
       println!("Passive connection established.")
     });
-    control
-      .write_all(
-        format!(
-          "227 Entering Passive Mode ({},{},{})\r\n",
-          ip,
-          port / 256,
-          port % 256,
-        )
-        .as_bytes(),
-      )
-      .await
-      .unwrap();
   }
   async fn port_mode(&self, control: &mut TcpStream, user: &mut User, port_addr: SocketAddr) {
     let stream = TcpStream::connect(port_addr).await.unwrap();
     user.sessions.insert(
-      port_addr,
+      user.addr,
       TransferSession {
         mode: user::TransferMode::Port(Mutex::new(stream)),
         total_size: 0,
@@ -404,13 +437,23 @@ impl FtpServer for Server {
     let mut new_path = Path::new(&self.root).join(&user.pwd);
     if new_path.pop() {
       let new_path = new_path.canonicalize().unwrap();
-      if user.pwd.starts_with(&self.root) {
+      if new_path.starts_with(&self.root) {
         user.pwd = new_path
           .to_str()
           .unwrap()
           .to_string()
           .replace(&self.root, ".");
+      } else {
+        control
+          .write_all(b"550 Permission denied.\r\n")
+          .await
+          .unwrap();
       }
+    } else {
+      control
+        .write_all(b"550 Permission denied.\r\n")
+        .await
+        .unwrap();
     }
     control
       .write_all(b"250 Directory successfully changed.\r\n")
