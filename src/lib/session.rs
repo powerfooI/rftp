@@ -16,6 +16,7 @@ pub struct TransferSession {
   pub finished_size: u64,
   pub file_name: String,
   pub finished: bool,
+  pub aborted: bool,
 }
 
 impl TransferSession {
@@ -26,6 +27,7 @@ impl TransferSession {
       finished_size: 0,
       file_name: String::new(),
       finished: false,
+      aborted: false,
     }
   }
   pub fn set_file_name(&mut self, name: String) {

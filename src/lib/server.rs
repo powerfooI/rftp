@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedWriteHalf};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
@@ -98,6 +98,9 @@ impl Server {
       let cloned_self = self.clone();
 
       let cmd = parse_command(req);
+      {
+        println!("Addr: {}, Cmd: {:?}", &user.lock().await.addr, cmd);
+      }
 
       if cmd == FtpCommand::QUIT {
         {
@@ -119,11 +122,6 @@ impl Server {
     cmd: FtpCommand,
     user: Arc<Mutex<User>>,
   ) {
-
-    {
-      println!("Addr: {}, Cmd: {:?}", &user.lock().await.addr, cmd);
-    }
-
     match cmd {
       FtpCommand::USER(username) => {
         self.user(control, user, username).await;

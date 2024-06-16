@@ -1,20 +1,24 @@
 use chrono::{DateTime, Local};
 use std::error::Error;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
+use tokio::time;
 
 use async_trait::async_trait;
 
 use crate::lib::server::Server;
 use crate::lib::session::*;
 use crate::lib::user::*;
+
+use super::session;
 
 #[async_trait]
 pub trait FtpServer {
@@ -180,23 +184,31 @@ impl FtpServer for Server {
     optional_dir: Option<String>,
   ) {
     let mut control = control.lock().await;
-    let mut user = user.lock().await;
-    let addr = user.addr.clone();
+    let user = user.lock().await;
     let path = match optional_dir {
       Some(path) => Path::new(&self.root).join(&user.pwd).join(path),
       None => Path::new(&self.root).join(&user.pwd),
     };
+    if !path.exists() {
+      control
+        .write_all(b"550 No such file or directory.\r\n")
+        .await
+        .unwrap();
+      return;
+    }
     let path = path.canonicalize().unwrap();
     if !path.starts_with(&self.root) {
       control
         .write_all(b"550 Permission denied.\r\n")
         .await
         .unwrap();
+      return;
     }
 
     let list = get_list_lines(&path).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
 
-    let session = user.sessions.get_mut(&addr).unwrap();
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
     let data_stream = session.get_stream();
     let mut data_stream = data_stream.lock().await;
 
@@ -219,12 +231,16 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let mut user = user.lock().await;
-    let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
-    let addr = user.addr;
+    let path = {
+      let user = user.lock().await;
 
-    let session = user.sessions.get_mut(&addr).unwrap();
-    session.file_name = file_name.clone();
+      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+      let session = user.session.clone().unwrap();
+      let mut session = session.lock().await;
+      session.file_name = file_name.clone();
+
+      path
+    };
 
     // Path join self.root, current_user.pwd, file_name
     if !Path::exists(&path) {
@@ -235,10 +251,7 @@ impl FtpServer for Server {
         .await
         .unwrap();
     }
-    let data_stream = session.get_stream();
-    let mut data_stream = data_stream.lock().await;
 
-    let file = fs::read(path).unwrap();
     {
       control
         .lock()
@@ -253,10 +266,43 @@ impl FtpServer for Server {
         .await
         .unwrap();
     }
-    data_stream.write_all(&file).await.unwrap();
+
+    let mut file = fs::File::open(path).unwrap();
+    loop {
+      let user = user.lock().await;
+      let session = user.session.clone().unwrap();
+      let session = session.lock().await;
+      if session.aborted {
+        break;
+      }
+      let data_stream = session.get_stream();
+      let mut data_stream = data_stream.lock().await;
+      let mut buf = vec![0u8; 32]; // TODO: Mock size
+      let n = file.read(&mut buf).unwrap();
+      if n == 0 {
+        break;
+      }
+      data_stream.write_all(&buf[..n]).await.unwrap();
+      time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
+
+    let data_stream = session.get_stream();
+    let mut data_stream = data_stream.lock().await;
     data_stream.shutdown().await.unwrap();
-    session.finished = true;
-    {
+
+    if session.aborted {
+      control
+        .lock()
+        .await
+        .write_all(b"226 Connection closed; transfer aborted.\r\n")
+        .await
+        .unwrap();
+    } else {
+      session.finished = true;
       control
         .lock()
         .await
@@ -272,14 +318,17 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let mut user = user.lock().await;
-    let addr = user.addr;
-    let target_path = Path::new(&self.root).join(&user.pwd).join(&file_name);
-    let session = user.sessions.get_mut(&addr).unwrap();
-    session.file_name = file_name.clone();
-    let data_stream = session.get_stream();
-    let mut data_stream = data_stream.lock().await;
+    let target_path = {
+      let user = user.lock().await;
+      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+      let session = user.get_session().unwrap();
+      let mut session = session.lock().await;
+      session.file_name = file_name.clone();
+      path
+    };
+
     let mut file = fs::File::create(target_path).unwrap();
+
     {
       control
         .lock()
@@ -294,16 +343,45 @@ impl FtpServer for Server {
         .await
         .unwrap();
     }
+
     loop {
-      let mut buf = vec![0; 1024];
+      let user = user.lock().await;
+      let session = user.session.clone().unwrap();
+      let session = session.lock().await;
+
+      if session.aborted {
+        break;
+      }
+
+      let data_stream = session.get_stream();
+      let mut data_stream = data_stream.lock().await;
+
+      let mut buf = vec![0; 32]; // TODO:
       let n = data_stream.read(&mut buf).await.unwrap();
+
       if n == 0 {
         break;
       }
       file.write_all(&buf[..n]).unwrap();
+      time::sleep(Duration::from_secs(1)).await;
     }
-    session.finished = true;
-    {
+
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
+
+    let data_stream = session.get_stream();
+    let mut data_stream = data_stream.lock().await;
+    data_stream.shutdown().await.unwrap();
+    if session.aborted {
+      control
+        .lock()
+        .await
+        .write_all(b"226 Connection closed; transfer aborted.\r\n")
+        .await
+        .unwrap();
+    } else {
+      session.finished = true;
       control
         .lock()
         .await
@@ -557,8 +635,6 @@ impl FtpServer for Server {
   }
   async fn passive_mode(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
     let cloned = user.clone();
-    let mut user = user.lock().await;
-    let addr = user.addr;
     let listener = self.generate_pasv_addr().await.unwrap();
     let listen_addr = listener
       .local_addr()
@@ -584,12 +660,15 @@ impl FtpServer for Server {
 
     tokio::spawn(async move {
       let (stream, _) = listener.accept().await.unwrap();
-      cloned.lock().await.sessions.insert(
-        addr,
-        TransferSession::new(TransferMode::Passive(Arc::new(Mutex::new(stream)))),
-      );
+      cloned
+        .lock()
+        .await
+        .set_new_session(TransferSession::new(TransferMode::Passive(Arc::new(
+          Mutex::new(stream),
+        ))));
     });
   }
+
   async fn port_mode(
     &self,
     control: Arc<Mutex<OwnedWriteHalf>>,
@@ -598,13 +677,11 @@ impl FtpServer for Server {
   ) {
     let mut user = user.lock().await;
     let stream = TcpStream::connect(port_addr).await.unwrap();
-    let addr = user.addr;
-    // let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    
-    user.sessions.insert(
-      addr,
-      TransferSession::new(TransferMode::Port(Arc::new(Mutex::new(stream)))),
-    );
+
+    user.set_new_session(TransferSession::new(TransferMode::Port(Arc::new(
+      Mutex::new(stream),
+    ))));
+
     control
       .lock()
       .await
@@ -612,17 +689,15 @@ impl FtpServer for Server {
       .await
       .unwrap();
   }
+
   async fn quit(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
     let mut user = user.lock().await;
-    let addr = user.addr;
-    user.sessions.remove(&addr);
+    user.session = None;
     let mut locking = control.lock().await;
-    locking
-      .write_all(b"221 Goodbye.\r\n")
-      .await
-      .unwrap();
+    locking.write_all(b"221 Goodbye.\r\n").await.unwrap();
     locking.shutdown().await.unwrap();
   }
+
   async fn noop(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
     control
       .lock()
@@ -661,20 +736,15 @@ impl FtpServer for Server {
       .unwrap();
   }
   async fn abort(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
-    {
-      let mut locking = user.lock().await;
-      locking.status = UserStatus::Active;
-      let addr = locking.addr;
-      // let cancel_tx = session.cancel_tx.clone(); // Clone the Sender
-      // {
-      //   let cancel_tx_locked = session.cancel_tx.lock().await;
-      //   cancel_tx_locked.send(()).unwrap();
-      // }
-    }
+    let mut locking = user.lock().await;
+    locking.status = UserStatus::Active;
+    let session = locking.session.clone().unwrap();
+    let mut session = session.lock().await;
+    session.aborted = true;
     control
       .lock()
       .await
-      .write_all(b"200 ABOR command successful.\r\n")
+      .write_all(b"226 ABOR command processed.\r\n") // '426', '225', '226'
       .await
       .unwrap();
   }
@@ -692,9 +762,9 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let mut user = user.lock().await;
-    let addr = user.addr;
-    let session = user.sessions.get_mut(&addr).unwrap();
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
     session.file_name = file_name;
     control
       .lock()
@@ -709,10 +779,10 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let mut user = user.lock().await;
-    let addr = user.addr;
+    let user = user.lock().await;
     let pwd = user.pwd.clone();
-    let session = user.sessions.get_mut(&addr).unwrap();
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
     let old_path = Path::new(&self.root).join(&pwd).join(&session.file_name);
     let new_path = Path::new(&self.root).join(&pwd).join(&file_name);
     fs::rename(old_path, new_path).unwrap();
@@ -792,9 +862,9 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let mut user = user.lock().await;
-    let addr = user.addr;
-    let session = user.sessions.get_mut(&addr).unwrap();
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
     session.file_name = file_name;
     control
       .lock()

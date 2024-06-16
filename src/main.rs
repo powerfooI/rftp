@@ -1,7 +1,7 @@
 mod arg_parser;
 mod lib;
 
-use lib::server::{Server};
+use lib::server::Server;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {

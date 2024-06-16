@@ -1,6 +1,7 @@
-use std::{collections::HashMap, net::SocketAddr};
 use crate::lib::session::TransferSession;
-use tokio::sync::{Mutex, oneshot};
+use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr};
+use tokio::sync::{oneshot, Mutex};
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -21,9 +22,8 @@ pub struct User {
   pub status: UserStatus,
   pub addr: SocketAddr,
   pub pwd: String,
-  pub sessions: HashMap<SocketAddr, TransferSession>,
+  pub session: Option<Arc<Mutex<TransferSession>>>,
   pub trans_type: TransferType,
-  // pub cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 impl User {
@@ -31,20 +31,29 @@ impl User {
     Self {
       addr,
       username,
-      sessions: HashMap::new(),
+      session: None,
       pwd: String::from("."),
       status: UserStatus::Logging,
       trans_type: TransferType::ASCII,
     }
   }
+
   pub fn new_anonymous(addr: SocketAddr) -> Self {
     Self {
       addr,
       status: UserStatus::Active,
       username: String::from("anonymous"),
-      sessions: HashMap::new(),
+      session: None,
       pwd: String::from("."),
       trans_type: TransferType::ASCII,
     }
+  }
+
+  pub fn set_new_session(&mut self, session: TransferSession) {
+    self.session = Some(Arc::new(Mutex::new(session)));
+  }
+
+  pub fn get_session(&self) -> Option<Arc<Mutex<TransferSession>>> {
+    self.session.clone()
   }
 }
