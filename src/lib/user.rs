@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr};
 use crate::lib::session::TransferSession;
+use tokio::sync::{Mutex, oneshot};
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -22,6 +23,7 @@ pub struct User {
   pub pwd: String,
   pub sessions: HashMap<SocketAddr, TransferSession>,
   pub trans_type: TransferType,
+  // pub cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 impl User {

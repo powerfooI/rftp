@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FtpCommand {
   // Basic commands
   USER(String),

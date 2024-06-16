@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
@@ -58,145 +59,149 @@ impl Server {
     }
   }
 
-  pub async fn handle(&self, mut socket: TcpStream, addr: SocketAddr) {
+  pub async fn handle(&self, socket: TcpStream, addr: SocketAddr) {
     let user_map = self.user_map.clone();
-    if !user_map.lock().await.contains_key(&addr) {
+    let mut user_map_locked = user_map.lock().await;
+    let (mut reader, mut writer) = socket.into_split();
+
+    if !user_map_locked.contains_key(&addr) {
       println!("New user: {}", addr);
-      socket
+      writer
         .write_all(b"220 rftp.whiteffire.cn FTP server ready.\r\n")
         .await
         .unwrap();
-      user_map.lock().await.insert(
+      user_map_locked.insert(
         addr.clone(),
         Arc::new(Mutex::new(User::new_anonymous(addr))),
       );
     }
-    let guard = Arc::new(Mutex::new(socket));
+    let writer_guard = Arc::new(Mutex::new(writer));
     loop {
       let mut buf = vec![0; 2048];
-      let cloned = guard.clone();
       let req = {
-        let mut stream = cloned.lock().await;
-        let n = match stream.read(&mut buf).await {
+        let n = match reader.read(&mut buf).await {
           Ok(n) => n,
           Err(_) => {
             println!("Connection closed: {}", addr);
-            user_map.lock().await.remove(&addr);
+            user_map_locked.remove(&addr);
             return;
           }
         };
         String::from_utf8_lossy(&buf[..n]).to_string()
       };
+
       if req.is_empty() {
         continue;
       }
-      self.dispatch(cloned, req, addr).await;
-      // socket.flush().await.unwrap();
+      let cloned_writer = writer_guard.clone();
+      let user = user_map_locked.get(&addr).unwrap().clone();
+      let cloned_self = self.clone();
+
+      let cmd = parse_command(req);
+
+      if cmd == FtpCommand::QUIT {
+        {
+          self.quit(cloned_writer, user).await;
+        }
+        user_map_locked.remove(&addr);
+        return;
+      }
+
+      tokio::spawn(async move {
+        cloned_self.dispatch(cloned_writer, cmd, user).await;
+      });
     }
   }
 
-  async fn dispatch(&self, control: Arc<Mutex<TcpStream>>, req: String, addr: SocketAddr) {
-    let cmd = parse_command(req);
-    println!("Addr: {}, Cmd: {:?}", addr, cmd);
+  async fn dispatch(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    cmd: FtpCommand,
+    user: Arc<Mutex<User>>,
+  ) {
 
-    let user_map = self.user_map.clone();
-    let mut user_map = user_map.lock().await;
-    let current_user = user_map.get_mut(&addr).unwrap();
-    let cloned_user = current_user.clone();
-    let mut locking_user = current_user.lock().await;
-    let locking_user = locking_user.borrow_mut();
-
-    let mut control_stream = control.lock().await;
-    let control_stream = control_stream.borrow_mut();
+    {
+      println!("Addr: {}, Cmd: {:?}", &user.lock().await.addr, cmd);
+    }
 
     match cmd {
       FtpCommand::USER(username) => {
-        self.user(control_stream, locking_user, username).await;
+        self.user(control, user, username).await;
       }
       FtpCommand::PASS(pwd) => {
-        self.pass(control_stream, locking_user, pwd).await;
+        self.pass(control, user, pwd).await;
       }
       FtpCommand::PORT(addr) => {
-        self.port_mode(control_stream, locking_user, addr).await;
+        self.port_mode(control, user, addr).await;
       }
       FtpCommand::PASV => {
-        self
-          .passive_mode(control_stream, locking_user, cloned_user)
-          .await;
+        self.passive_mode(control, user).await;
       }
       FtpCommand::RETR(file_name) => {
-        self.retrieve(control_stream, locking_user, file_name).await;
+        self.retrieve(control, user, file_name).await;
       }
       FtpCommand::STOR(file_name) => {
-        self.store(control_stream, locking_user, file_name).await;
+        self.store(control, user, file_name).await;
       }
       FtpCommand::ABOR => {
-        self.abort(control_stream, locking_user).await;
+        self.abort(control, user).await;
       }
       FtpCommand::QUIT => {
-        self.quit(control_stream, locking_user).await;
+        self.quit(control, user).await;
       }
       FtpCommand::SYST => {
-        self.system_info(control_stream, locking_user).await;
+        self.system_info(control, user).await;
       }
       FtpCommand::TYPE(type_) => {
-        self.set_type(control_stream, locking_user, type_).await;
+        self.set_type(control, user, type_).await;
       }
       FtpCommand::RNFR(file_name) => {
-        self
-          .rename_from(control_stream, locking_user, file_name)
-          .await;
+        self.rename_from(control, user, file_name).await;
       }
       FtpCommand::RNTO(file_name) => {
-        self
-          .rename_to(control_stream, locking_user, file_name)
-          .await;
+        self.rename_to(control, user, file_name).await;
       }
       FtpCommand::PWD => {
-        self.pwd(control_stream, locking_user).await;
+        self.pwd(control, user).await;
       }
       FtpCommand::CWD(dir_name) => {
-        self.cwd(control_stream, locking_user, dir_name).await;
+        self.cwd(control, user, dir_name).await;
       }
       FtpCommand::MKD(dir_name) => {
-        self.make_dir(control_stream, locking_user, dir_name).await;
+        self.make_dir(control, user, dir_name).await;
       }
       FtpCommand::RMD(dir_name) => {
-        self
-          .remove_dir(control_stream, locking_user, dir_name)
-          .await;
+        self.remove_dir(control, user, dir_name).await;
       }
       FtpCommand::LIST(optional_dir) => {
-        self.list(control_stream, locking_user, optional_dir).await;
+        self.list(control, user, optional_dir).await;
       }
       FtpCommand::REST => {
-        self.restart(control_stream, locking_user).await;
+        self.restart(control, user).await;
       }
       FtpCommand::DELE(file_name) => {
-        self.delete(control_stream, locking_user, file_name).await;
+        self.delete(control, user, file_name).await;
       }
       FtpCommand::STAT(optional_path) => {
-        self
-          .status(control_stream, locking_user, optional_path)
-          .await;
+        self.status(control, user, optional_path).await;
       }
       FtpCommand::STOU => {
-        self.store_unique(control_stream, locking_user).await;
+        self.store_unique(control, user).await;
       }
       FtpCommand::APPE(file_name) => {
-        self.append(control_stream, locking_user, file_name).await;
+        self.append(control, user, file_name).await;
       }
       FtpCommand::ALLO(size) => {
-        self.allocate(control_stream, locking_user, size).await;
+        self.allocate(control, user, size).await;
       }
       FtpCommand::NOOP => {
-        self.noop(control_stream, locking_user).await;
+        self.noop(control, user).await;
       }
       FtpCommand::FEAT => {
-        self.feat(control_stream, locking_user).await;
+        self.feat(control, user).await;
       }
       FtpCommand::CDUP => {
-        self.cd_up(control_stream, locking_user).await;
+        self.cd_up(control, user).await;
       }
     }
   }
