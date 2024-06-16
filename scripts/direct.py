@@ -13,6 +13,8 @@ ftp.pwd()
 
 ftp.cwd("/")
 
+ftp.nlst()
+
 ftp.pwd()
 
 ftp.mkd("test2")
@@ -30,13 +32,15 @@ def delay_abort():
     time.sleep(2.5)
     ftp.abort()
     
-threading.Thread(target=delay_abort, args=()).start()
+# threading.Thread(target=delay_abort, args=()).start()
 
-ftp.retrbinary('RETR test.txt', open('test.txt', 'wb').write)
+# ftp.retrbinary('RETR test.txt', open('test.txt', 'wb').write)
 
-threading.Thread(target=delay_abort, args=()).start()
+# threading.Thread(target=delay_abort, args=()).start()
 
-ftp.storbinary('STOR test-store.txt', open('test-store.txt', 'rb'))
+# ftp.storbinary('STOR test-store.txt', open('test-store.txt', 'rb'))
+
+ftp.storbinary('STOU', open('test-store.txt', 'rb'))
 
 ftp.retrlines('LIST test1.txt')
 

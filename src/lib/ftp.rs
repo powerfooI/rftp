@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local};
+use uuid::Uuid;
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
@@ -9,7 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 use tokio::time;
 
 use async_trait::async_trait;
@@ -17,8 +18,6 @@ use async_trait::async_trait;
 use crate::lib::server::Server;
 use crate::lib::session::*;
 use crate::lib::user::*;
-
-use super::session;
 
 #[async_trait]
 pub trait FtpServer {
@@ -130,13 +129,172 @@ pub trait FtpServer {
     user: Arc<Mutex<User>>,
     file_name: String,
   );
+  async fn name_list(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    optional_dir: Option<String>,
+  );
 }
 
-fn file_path_to_list_item(path: &PathBuf) -> Result<String, Box<dyn Error>> {
+#[async_trait]
+trait FtpHelper {
+  async fn list_files(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    optional_dir: Option<String>,
+    name_only: bool,
+  );
+
+  async fn store_file(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    file_name: String,
+  );
+}
+
+#[async_trait]
+impl FtpHelper for Server {
+  async fn list_files(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    optional_dir: Option<String>,
+    name_only: bool,
+  ) {
+    let mut control = control.lock().await;
+    let user = user.lock().await;
+    let path = match optional_dir {
+      Some(path) => Path::new(&self.root).join(&user.pwd).join(path),
+      None => Path::new(&self.root).join(&user.pwd),
+    };
+    if !path.exists() {
+      control
+        .write_all(b"550 No such file or directory.\r\n")
+        .await
+        .unwrap();
+      return;
+    }
+    let path = path.canonicalize().unwrap();
+    if !path.starts_with(&self.root) {
+      control
+        .write_all(b"550 Permission denied.\r\n")
+        .await
+        .unwrap();
+      return;
+    }
+
+    let list =
+      get_list_lines(&path, name_only).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
+
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
+    let data_stream = session.get_stream();
+    let mut data_stream = data_stream.lock().await;
+
+    control
+      .write_all(b"150 Opening ASCII mode data connection for file list\r\n")
+      .await
+      .unwrap();
+    data_stream.write_all(list.as_bytes()).await.unwrap();
+    data_stream.shutdown().await.unwrap();
+    session.set_finished(true);
+    control
+      .write_all(b"226 Transfer complete.\r\n")
+      .await
+      .unwrap();
+  }
+
+  async fn store_file(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    file_name: String,
+  ) {
+    let target_path = {
+      let user = user.lock().await;
+      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+      let session = user.get_session().unwrap();
+      let mut session = session.lock().await;
+      session.file_name = file_name.clone();
+      path
+    };
+
+    let mut file = fs::File::create(target_path).unwrap();
+
+    {
+      control
+        .lock()
+        .await
+        .write_all(
+          format!(
+            "150 Opening BINARY mode data connection for {}.\r\n",
+            file_name
+          )
+          .as_bytes(),
+        )
+        .await
+        .unwrap();
+    }
+
+    loop {
+      let user = user.lock().await;
+      let session = user.session.clone().unwrap();
+      let session = session.lock().await;
+
+      if session.aborted {
+        break;
+      }
+
+      let data_stream = session.get_stream();
+      let mut data_stream = data_stream.lock().await;
+
+      let mut buf = vec![0; 1024];
+      let n = data_stream.read(&mut buf).await.unwrap();
+
+      if n == 0 {
+        break;
+      }
+      file.write_all(&buf[..n]).unwrap();
+      time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
+
+    let data_stream = session.get_stream();
+    let mut data_stream = data_stream.lock().await;
+    data_stream.shutdown().await.unwrap();
+    if session.aborted {
+      control
+        .lock()
+        .await
+        .write_all(b"226 Connection closed; transfer aborted.\r\n")
+        .await
+        .unwrap();
+    } else {
+      session.finished = true;
+      control
+        .lock()
+        .await
+        .write_all(b"226 Transfer complete.\r\n")
+        .await
+        .unwrap();
+    }
+  }
+}
+
+fn file_path_to_list_item(path: &PathBuf, name_only: bool) -> Result<String, Box<dyn Error>> {
   // https://files.stairways.com/other/ftp-list-specs-info.txt
   // http://cr.yp.to/ftp/list/binls.html
   let metadata = fs::metadata(&path)?;
   let file_name = path.file_name().unwrap().to_str().unwrap();
+  if name_only {
+    return Ok(format!("{}\r\n", file_name).to_string());
+  }
   let file_size = format!("{:>13}", metadata.len());
   let file_type = if metadata.is_dir() { "d" } else { "-" };
   let file_time = metadata
@@ -161,16 +319,16 @@ fn file_path_to_list_item(path: &PathBuf) -> Result<String, Box<dyn Error>> {
   )
 }
 
-fn get_list_lines(path: &PathBuf) -> Result<String, Box<dyn Error>> {
+fn get_list_lines(path: &PathBuf, name_only: bool) -> Result<String, Box<dyn Error>> {
   let mut list = String::new();
   if path.is_dir() {
     let mut files = fs::read_dir(&path)?;
     while let Some(file) = files.next() {
       let file = file?;
-      list.push_str(file_path_to_list_item(&file.path())?.as_str());
+      list.push_str(file_path_to_list_item(&file.path(), name_only)?.as_str());
     }
   } else {
-    list.push_str(file_path_to_list_item(path)?.as_str());
+    list.push_str(file_path_to_list_item(path, name_only)?.as_str());
   }
   Ok(list)
 }
@@ -183,46 +341,16 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     optional_dir: Option<String>,
   ) {
-    let mut control = control.lock().await;
-    let user = user.lock().await;
-    let path = match optional_dir {
-      Some(path) => Path::new(&self.root).join(&user.pwd).join(path),
-      None => Path::new(&self.root).join(&user.pwd),
-    };
-    if !path.exists() {
-      control
-        .write_all(b"550 No such file or directory.\r\n")
-        .await
-        .unwrap();
-      return;
-    }
-    let path = path.canonicalize().unwrap();
-    if !path.starts_with(&self.root) {
-      control
-        .write_all(b"550 Permission denied.\r\n")
-        .await
-        .unwrap();
-      return;
-    }
+    self.list_files(control, user, optional_dir, false).await;
+  }
 
-    let list = get_list_lines(&path).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
-
-    let session = user.session.clone().unwrap();
-    let mut session = session.lock().await;
-    let data_stream = session.get_stream();
-    let mut data_stream = data_stream.lock().await;
-
-    control
-      .write_all(b"150 Opening ASCII mode data connection for file list\r\n")
-      .await
-      .unwrap();
-    data_stream.write_all(list.as_bytes()).await.unwrap();
-    data_stream.shutdown().await.unwrap();
-    session.set_finished(true);
-    control
-      .write_all(b"226 Transfer complete.\r\n")
-      .await
-      .unwrap();
+  async fn name_list(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    optional_dir: Option<String>,
+  ) {
+    self.list_files(control, user, optional_dir, true).await;
   }
 
   async fn retrieve(
@@ -277,7 +405,7 @@ impl FtpServer for Server {
       }
       let data_stream = session.get_stream();
       let mut data_stream = data_stream.lock().await;
-      let mut buf = vec![0u8; 32]; // TODO: Mock size
+      let mut buf = vec![0u8; 1024];
       let n = file.read(&mut buf).unwrap();
       if n == 0 {
         break;
@@ -318,77 +446,7 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let target_path = {
-      let user = user.lock().await;
-      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
-      let session = user.get_session().unwrap();
-      let mut session = session.lock().await;
-      session.file_name = file_name.clone();
-      path
-    };
-
-    let mut file = fs::File::create(target_path).unwrap();
-
-    {
-      control
-        .lock()
-        .await
-        .write_all(
-          format!(
-            "150 Opening BINARY mode data connection for {}.\r\n",
-            file_name
-          )
-          .as_bytes(),
-        )
-        .await
-        .unwrap();
-    }
-
-    loop {
-      let user = user.lock().await;
-      let session = user.session.clone().unwrap();
-      let session = session.lock().await;
-
-      if session.aborted {
-        break;
-      }
-
-      let data_stream = session.get_stream();
-      let mut data_stream = data_stream.lock().await;
-
-      let mut buf = vec![0; 32]; // TODO:
-      let n = data_stream.read(&mut buf).await.unwrap();
-
-      if n == 0 {
-        break;
-      }
-      file.write_all(&buf[..n]).unwrap();
-      time::sleep(Duration::from_secs(1)).await;
-    }
-
-    let user = user.lock().await;
-    let session = user.session.clone().unwrap();
-    let mut session = session.lock().await;
-
-    let data_stream = session.get_stream();
-    let mut data_stream = data_stream.lock().await;
-    data_stream.shutdown().await.unwrap();
-    if session.aborted {
-      control
-        .lock()
-        .await
-        .write_all(b"226 Connection closed; transfer aborted.\r\n")
-        .await
-        .unwrap();
-    } else {
-      session.finished = true;
-      control
-        .lock()
-        .await
-        .write_all(b"226 Transfer complete.\r\n")
-        .await
-        .unwrap();
-    }
+    self.store_file(control, user, file_name).await;
   }
 
   async fn make_dir(
@@ -825,7 +883,8 @@ impl FtpServer for Server {
               .await
               .unwrap();
           }
-          let list = get_list_lines(&path).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
+          let list =
+            get_list_lines(&path, false).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
           control
             .write_all(format!("213-Status of {}:\r\n", path_str).as_bytes())
             .await
@@ -849,12 +908,8 @@ impl FtpServer for Server {
     }
   }
   async fn store_unique(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
-    control
-      .lock()
-      .await
-      .write_all(b"202 Command not implemented, superfluous at this site.\r\n")
-      .await
-      .unwrap();
+    let file_name = Uuid::new_v4().to_string();
+    self.store_file(control, user, file_name).await;
   }
   async fn append(
     &self,

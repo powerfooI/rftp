@@ -29,8 +29,11 @@ pub enum FtpCommand {
   APPE(String),
   ALLO(u64),
   NOOP,
-  FEAT,
+  NLST(Option<String>),
   CDUP,
+
+  FEAT,
+  MDTM(String),
 }
 
 fn empty_to_some(s: String) -> Option<String> {
@@ -85,6 +88,8 @@ pub fn parse_command(req: String) -> FtpCommand {
     "ALLO" => FtpCommand::ALLO(arg.parse().unwrap()),
     "FEAT" => FtpCommand::FEAT,
     "CDUP" => FtpCommand::CDUP,
+    "MDTM" => FtpCommand::MDTM(arg),
+    "NLST" => FtpCommand::NLST(empty_to_some(arg)),
     _ => {
       println!("Unknown command: {}, Args: {}", cmd, arg);
       FtpCommand::NOOP

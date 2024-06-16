@@ -145,6 +145,7 @@ impl Server {
         self.abort(control, user).await;
       }
       FtpCommand::QUIT => {
+        // NOTES: QUIT command is handled in the main loop
         self.quit(control, user).await;
       }
       FtpCommand::SYST => {
@@ -200,6 +201,12 @@ impl Server {
       }
       FtpCommand::CDUP => {
         self.cd_up(control, user).await;
+      }
+      FtpCommand::MDTM(filename) => {
+        self.get_modify_timestamp(control, user, filename).await;
+      }
+      FtpCommand::NLST(optional_dir) => {
+        self.name_list(control, user, optional_dir).await;
       }
     }
   }
