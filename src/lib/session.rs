@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum TransferMode {
@@ -17,6 +17,7 @@ pub struct TransferSession {
   pub file_name: String,
   pub finished: bool,
   pub aborted: bool,
+  pub offset: u64,
 }
 
 impl TransferSession {
@@ -28,6 +29,7 @@ impl TransferSession {
       file_name: String::new(),
       finished: false,
       aborted: false,
+      offset: 0,
     }
   }
   pub fn set_file_name(&mut self, name: String) {
@@ -49,4 +51,3 @@ impl TransferSession {
     }
   }
 }
-

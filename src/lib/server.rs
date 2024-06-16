@@ -175,8 +175,8 @@ impl Server {
       FtpCommand::LIST(optional_dir) => {
         self.list(control, user, optional_dir).await;
       }
-      FtpCommand::REST => {
-        self.restart(control, user).await;
+      FtpCommand::REST(offset) => {
+        self.restart(control, user, offset).await;
       }
       FtpCommand::DELE(file_name) => {
         self.delete(control, user, file_name).await;

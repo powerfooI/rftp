@@ -8,20 +8,19 @@
 * `PORT/PASV`
 * `RETR/STOR`
 * `ABOR/QUIT`
-* `SYST/TYPE`
+* `SYST/TYPE/STAT`
 * `RNFR/RNTO`
 * `PWD/CWD/MKD/RMD`
-* `LIST`
+* `LIST/NLST`
+* `DELE`
 
 ### Advanced Commands
 
 * `REST`
-* `DELE`
-* `STAT`
 * `STOU`
 * `APPE`
 * `ALLO`
-
+* `SITE`
 
 ## References 
 

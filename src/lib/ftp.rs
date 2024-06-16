@@ -1,17 +1,15 @@
 use chrono::{DateTime, Local};
-use uuid::Uuid;
 use std::error::Error;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::time;
+use uuid::Uuid;
 
 use async_trait::async_trait;
 
@@ -106,7 +104,7 @@ pub trait FtpServer {
     user: Arc<Mutex<User>>,
     file_name: String,
   );
-  async fn restart(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>);
+  async fn restart(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>, offset: u64);
   async fn status(
     &self,
     control: Arc<Mutex<OwnedWriteHalf>>,
@@ -213,16 +211,25 @@ impl FtpHelper for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let target_path = {
+    let (target_path, mut offset) = {
       let user = user.lock().await;
       let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
       let session = user.get_session().unwrap();
       let mut session = session.lock().await;
       session.file_name = file_name.clone();
-      path
+
+      (path, session.offset)
     };
 
-    let mut file = fs::File::create(target_path).unwrap();
+    if !target_path.starts_with(&self.root) {
+      control
+        .lock()
+        .await
+        .write_all(b"550 Permission denied.\r\n")
+        .await
+        .unwrap();
+      return;
+    }
 
     {
       control
@@ -239,10 +246,39 @@ impl FtpHelper for Server {
         .unwrap();
     }
 
+    let mut file = if target_path.exists() {
+      let meta = target_path.metadata().unwrap();
+      if meta.is_dir() {
+        control
+          .lock()
+          .await
+          .write_all(b"550 Permission denied, the path is a directory.\r\n")
+          .await
+          .unwrap();
+        return;
+      }
+      if offset == 0 {
+        control
+          .lock()
+          .await
+          .write_all(b"550 Permission denied, the file exists.\r\n")
+          .await
+          .unwrap();
+      }
+      if offset > meta.len() {
+        offset = meta.len();
+      }
+      let mut file = fs::File::open(target_path).unwrap();
+      file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+      file
+    } else {
+      fs::File::create(target_path).unwrap()
+    };
+
     loop {
       let user = user.lock().await;
       let session = user.session.clone().unwrap();
-      let session = session.lock().await;
+      let mut session = session.lock().await;
 
       if session.aborted {
         break;
@@ -258,7 +294,7 @@ impl FtpHelper for Server {
         break;
       }
       file.write_all(&buf[..n]).unwrap();
-      time::sleep(Duration::from_secs(1)).await;
+      session.finished_size += n as u64;
     }
 
     let user = user.lock().await;
@@ -359,7 +395,7 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let path = {
+    let (path, offset) = {
       let user = user.lock().await;
 
       let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
@@ -367,7 +403,7 @@ impl FtpServer for Server {
       let mut session = session.lock().await;
       session.file_name = file_name.clone();
 
-      path
+      (path, session.offset)
     };
 
     // Path join self.root, current_user.pwd, file_name
@@ -396,10 +432,24 @@ impl FtpServer for Server {
     }
 
     let mut file = fs::File::open(path).unwrap();
+    if offset > 0 {
+      let meta = file.metadata().unwrap();
+      let file_size = meta.len();
+      if offset >= file_size {
+        control
+          .lock()
+          .await
+          .write_all(b"550 Offset out of range.\r\n")
+          .await
+          .unwrap();
+        return;
+      }
+      file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    }
     loop {
       let user = user.lock().await;
       let session = user.session.clone().unwrap();
-      let session = session.lock().await;
+      let mut session = session.lock().await;
       if session.aborted {
         break;
       }
@@ -411,7 +461,7 @@ impl FtpServer for Server {
         break;
       }
       data_stream.write_all(&buf[..n]).await.unwrap();
-      time::sleep(Duration::from_secs(1)).await;
+      session.finished_size += n as u64;
     }
 
     let user = user.lock().await;
@@ -854,7 +904,16 @@ impl FtpServer for Server {
         .unwrap();
     }
   }
-  async fn restart(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>) {
+  async fn restart(
+    &self,
+    control: Arc<Mutex<OwnedWriteHalf>>,
+    user: Arc<Mutex<User>>,
+    offset: u64,
+  ) {
+    let user = user.lock().await;
+    let session = user.session.clone().unwrap();
+    let mut session = session.lock().await;
+    session.offset = offset;
     control
       .lock()
       .await
@@ -917,16 +976,14 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
     file_name: String,
   ) {
-    let user = user.lock().await;
-    let session = user.session.clone().unwrap();
-    let mut session = session.lock().await;
-    session.file_name = file_name;
-    control
-      .lock()
-      .await
-      .write_all(b"150 File status okay; about to open data connection.\r\n")
-      .await
-      .unwrap();
+    {
+      let user = user.lock().await;
+      let session = user.session.clone().unwrap();
+      let mut session = session.lock().await;
+      session.file_name = file_name.clone();
+      session.offset = u64::MAX;
+    }
+    self.store_file(control, user, file_name).await;
   }
   async fn allocate(&self, control: Arc<Mutex<OwnedWriteHalf>>, user: Arc<Mutex<User>>, size: u64) {
     control

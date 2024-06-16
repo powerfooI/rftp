@@ -22,7 +22,7 @@ pub enum FtpCommand {
   LIST(Option<String>),
 
   // Advanced commands
-  REST,
+  REST(u64),
   DELE(String),
   STAT(Option<String>),
   STOU,
@@ -80,7 +80,7 @@ pub fn parse_command(req: String) -> FtpCommand {
     "MKD" => FtpCommand::MKD(arg),
     "RMD" => FtpCommand::RMD(arg),
     "LIST" => FtpCommand::LIST(empty_to_some(arg)),
-    "REST" => FtpCommand::REST,
+    "REST" => FtpCommand::REST(arg.parse().unwrap()),
     "DELE" => FtpCommand::DELE(arg),
     "STAT" => FtpCommand::STAT(empty_to_some(arg)),
     "STOU" => FtpCommand::STOU,
