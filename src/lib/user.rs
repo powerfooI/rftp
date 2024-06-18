@@ -1,7 +1,8 @@
 use crate::lib::session::TransferSession;
+use std::error::Error;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{collections::HashMap, net::SocketAddr};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum UserStatus {
@@ -53,7 +54,10 @@ impl User {
     self.session = Some(Arc::new(Mutex::new(session)));
   }
 
-  pub fn get_session(&self) -> Option<Arc<Mutex<TransferSession>>> {
-    self.session.clone()
+  pub fn get_session(&self) -> Result<Arc<Mutex<TransferSession>>, Box<dyn Error>> {
+    match self.session.clone() {
+      Some(s) => Ok(s),
+      None => Err("No session found".into()),
+    }
   }
 }

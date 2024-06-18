@@ -1,6 +1,6 @@
 use crate::arg_parser::Args;
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
+use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -104,14 +104,28 @@ impl Server {
 
       if cmd == FtpCommand::QUIT {
         {
-          self.quit(cloned_writer, user).await;
+          let _ = self.quit(cloned_writer, user).await;
         }
         user_map_locked.remove(&addr);
         return;
       }
 
       tokio::spawn(async move {
-        cloned_self.dispatch(cloned_writer, cmd, user).await;
+        let cloned = cloned_writer.clone();
+        let error_msg = match cloned_self.dispatch(cloned_writer.clone(), cmd, user).await {
+          Err(e) => String::from(e.to_string()),
+          Ok(_) => String::new(),
+        };
+        if !error_msg.is_empty() {
+          println!("Error occurs: {}", error_msg);
+          let mut writer = cloned.lock().await;
+          if let Err(e) = writer
+            .write_all(format!("550 Error occurs: {}", error_msg).as_bytes())
+            .await
+          {
+            println!("Failed to respond error: {}", e)
+          }
+        }
       });
     }
   }
@@ -121,106 +135,52 @@ impl Server {
     control: Arc<Mutex<OwnedWriteHalf>>,
     cmd: FtpCommand,
     user: Arc<Mutex<User>>,
-  ) {
+  ) -> Result<(), Box<dyn Error>> {
     match cmd {
-      FtpCommand::USER(username) => {
-        self.user(control, user, username).await;
-      }
-      FtpCommand::PASS(pwd) => {
-        self.pass(control, user, pwd).await;
-      }
-      FtpCommand::PORT(addr) => {
-        self.port_mode(control, user, addr).await;
-      }
-      FtpCommand::PASV => {
-        self.passive_mode(control, user).await;
-      }
-      FtpCommand::RETR(file_name) => {
-        self.retrieve(control, user, file_name).await;
-      }
-      FtpCommand::STOR(file_name) => {
-        self.store(control, user, file_name).await;
-      }
-      FtpCommand::ABOR => {
-        self.abort(control, user).await;
-      }
+      FtpCommand::USER(username) => self.user(control, user, username).await,
+      FtpCommand::PASS(pwd) => self.pass(control, user, pwd).await,
+      FtpCommand::PORT(addr) => self.port_mode(control, user, addr).await,
+      FtpCommand::PASV => self.passive_mode(control, user).await,
+      FtpCommand::RETR(file_name) => self.retrieve(control, user, file_name).await,
+      FtpCommand::STOR(file_name) => self.store(control, user, file_name).await,
+      FtpCommand::ABOR => self.abort(control, user).await,
       FtpCommand::QUIT => {
         // NOTES: QUIT command is handled in the main loop
-        self.quit(control, user).await;
+        self.quit(control, user).await
       }
-      FtpCommand::SYST => {
-        self.system_info(control, user).await;
-      }
-      FtpCommand::TYPE(type_) => {
-        self.set_type(control, user, type_).await;
-      }
-      FtpCommand::RNFR(file_name) => {
-        self.rename_from(control, user, file_name).await;
-      }
-      FtpCommand::RNTO(file_name) => {
-        self.rename_to(control, user, file_name).await;
-      }
-      FtpCommand::PWD => {
-        self.pwd(control, user).await;
-      }
-      FtpCommand::CWD(dir_name) => {
-        self.cwd(control, user, dir_name).await;
-      }
-      FtpCommand::MKD(dir_name) => {
-        self.make_dir(control, user, dir_name).await;
-      }
-      FtpCommand::RMD(dir_name) => {
-        self.remove_dir(control, user, dir_name).await;
-      }
-      FtpCommand::LIST(optional_dir) => {
-        self.list(control, user, optional_dir).await;
-      }
-      FtpCommand::REST(offset) => {
-        self.restart(control, user, offset).await;
-      }
-      FtpCommand::DELE(file_name) => {
-        self.delete(control, user, file_name).await;
-      }
-      FtpCommand::STAT(optional_path) => {
-        self.status(control, user, optional_path).await;
-      }
-      FtpCommand::STOU => {
-        self.store_unique(control, user).await;
-      }
-      FtpCommand::APPE(file_name) => {
-        self.append(control, user, file_name).await;
-      }
-      FtpCommand::ALLO(size) => {
-        self.allocate(control, user, size).await;
-      }
-      FtpCommand::NOOP => {
-        self.noop(control, user).await;
-      }
-      FtpCommand::FEAT => {
-        self.feat(control, user).await;
-      }
-      FtpCommand::CDUP => {
-        self.cd_up(control, user).await;
-      }
-      FtpCommand::MDTM(filename) => {
-        self.get_modify_timestamp(control, user, filename).await;
-      }
-      FtpCommand::NLST(optional_dir) => {
-        self.name_list(control, user, optional_dir).await;
-      }
+      FtpCommand::SYST => self.system_info(control, user).await,
+      FtpCommand::TYPE(type_) => self.set_type(control, user, type_).await,
+      FtpCommand::RNFR(file_name) => self.rename_from(control, user, file_name).await,
+      FtpCommand::RNTO(file_name) => self.rename_to(control, user, file_name).await,
+      FtpCommand::PWD => self.pwd(control, user).await,
+      FtpCommand::CWD(dir_name) => self.cwd(control, user, dir_name).await,
+      FtpCommand::MKD(dir_name) => self.make_dir(control, user, dir_name).await,
+      FtpCommand::RMD(dir_name) => self.remove_dir(control, user, dir_name).await,
+      FtpCommand::LIST(optional_dir) => self.list(control, user, optional_dir).await,
+      FtpCommand::REST(offset) => self.restart(control, user, offset).await,
+      FtpCommand::DELE(file_name) => self.delete(control, user, file_name).await,
+      FtpCommand::STAT(optional_path) => self.status(control, user, optional_path).await,
+      FtpCommand::STOU => self.store_unique(control, user).await,
+      FtpCommand::APPE(file_name) => self.append(control, user, file_name).await,
+      FtpCommand::ALLO(size) => self.allocate(control, user, size).await,
+      FtpCommand::NOOP => self.noop(control, user).await,
+      FtpCommand::FEAT => self.feat(control, user).await,
+      FtpCommand::CDUP => self.cd_up(control, user).await,
+      FtpCommand::MDTM(filename) => self.get_modify_timestamp(control, user, filename).await,
+      FtpCommand::NLST(optional_dir) => self.name_list(control, user, optional_dir).await,
     }
   }
 
-  pub async fn generate_pasv_addr(&self) -> Option<TcpListener> {
+  pub async fn generate_pasv_addr(&self) -> Result<TcpListener, Box<dyn Error>> {
     for port in 49152..65535 {
       let addr = format!("{}:{}", self.host, port);
       if let Ok(addr) = addr.parse::<SocketAddr>() {
         match TcpListener::bind(addr).await {
-          Ok(listener) => return Some(listener),
+          Ok(listener) => return Ok(listener),
           Err(_) => continue,
         }
       }
     }
-    None
+    Err("Failed to generate PASV address".into())
   }
 }
