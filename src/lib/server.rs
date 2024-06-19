@@ -11,7 +11,6 @@ use tokio::sync::Mutex;
 
 use crate::lib::commands::{parse_command, FtpCommand};
 use crate::lib::ftp::FtpServer;
-use crate::lib::session::TransferSession;
 use crate::lib::user::User;
 
 #[derive(Debug, Clone)]
@@ -21,7 +20,6 @@ pub struct Server {
   pub root: String,
   pub listener: Arc<Mutex<TcpListener>>,
   pub user_map: Arc<Mutex<HashMap<SocketAddr, Arc<Mutex<User>>>>>,
-  pub data_map: Arc<Mutex<HashMap<u16, TransferSession>>>,
 }
 
 impl Server {
@@ -38,7 +36,6 @@ impl Server {
         .to_string(),
       listener: Arc::new(Mutex::new(listener)),
       user_map: Arc::new(Mutex::new(HashMap::new())),
-      data_map: Arc::new(Mutex::new(HashMap::new())),
     })
   }
 
@@ -48,7 +45,6 @@ impl Server {
     // todo: token pool and idle pool
     loop {
       if let Ok((socket, addr)) = self.listener.lock().await.accept().await {
-        // let data_map = self.data_map.clone();
         let shared_self = self.clone();
         tokio::spawn(async move {
           shared_self.handle(socket, addr).await;
@@ -115,9 +111,7 @@ impl Server {
       let cloned_self = self.clone();
 
       let cmd = parse_command(req);
-      {
-        println!("Addr: {}, Cmd: {:?}", &user.lock().await.addr, cmd);
-      }
+      println!("Addr: {}, Cmd: {:?}", addr, cmd);
 
       if cmd == FtpCommand::QUIT {
         {
