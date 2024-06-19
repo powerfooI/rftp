@@ -1,5 +1,5 @@
 pub mod commands;
 pub mod ftp;
-pub mod user;
 pub mod server;
 pub mod session;
+pub mod user;

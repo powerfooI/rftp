@@ -61,19 +61,30 @@ impl Server {
 
   pub async fn handle(&self, socket: TcpStream, addr: SocketAddr) {
     let user_map = self.user_map.clone();
-    let mut user_map_locked = user_map.lock().await;
     let (mut reader, mut writer) = socket.into_split();
 
-    if !user_map_locked.contains_key(&addr) {
-      println!("New user: {}", addr);
-      writer
-        .write_all(b"220 rftp.whiteffire.cn FTP server ready.\r\n")
-        .await
-        .unwrap();
-      user_map_locked.insert(
-        addr.clone(),
-        Arc::new(Mutex::new(User::new_anonymous(addr))),
-      );
+    println!("New connection: {}", addr);
+    {
+      let mut user_map_locked = user_map.lock().await;
+      if !user_map_locked.contains_key(&addr) {
+        if let Err(e) = writer
+          .write_all(b"220 rftp.whiteffire.cn FTP server ready.\r\n")
+          .await
+        {
+          println!("Failed to send welcome message: {}", e);
+          return;
+        }
+
+        let new_user = match User::new_anonymous(addr, &self.root) {
+          Ok(u) => u,
+          Err(e) => {
+            println!("Failed to create new user: {}", e);
+            return;
+          }
+        };
+
+        user_map_locked.insert(addr.clone(), Arc::new(Mutex::new(new_user)));
+      }
     }
     let writer_guard = Arc::new(Mutex::new(writer));
     loop {
@@ -83,7 +94,7 @@ impl Server {
           Ok(n) => n,
           Err(_) => {
             println!("Connection closed: {}", addr);
-            user_map_locked.remove(&addr);
+            user_map.lock().await.remove(&addr);
             return;
           }
         };
@@ -94,7 +105,13 @@ impl Server {
         continue;
       }
       let cloned_writer = writer_guard.clone();
-      let user = user_map_locked.get(&addr).unwrap().clone();
+      let user = match user_map.lock().await.get(&addr) {
+        Some(u) => u.clone(),
+        None => {
+          println!("User not found: {}", addr);
+          return;
+        }
+      };
       let cloned_self = self.clone();
 
       let cmd = parse_command(req);
@@ -106,7 +123,7 @@ impl Server {
         {
           let _ = self.quit(cloned_writer, user).await;
         }
-        user_map_locked.remove(&addr);
+        user_map.lock().await.remove(&addr);
         return;
       }
 

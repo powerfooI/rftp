@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local};
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -211,8 +211,8 @@ impl FtpHelper for Server {
     let mut control = control.lock().await;
     let user = user.lock().await;
     let path = match optional_dir {
-      Some(path) => Path::new(&self.root).join(&user.pwd).join(path),
-      None => Path::new(&self.root).join(&user.pwd),
+      Some(path) => Path::new(&self.root).join(&user.pwd()).join(path),
+      None => Path::new(&self.root).join(&user.pwd()),
     };
     if !path.exists() {
       control
@@ -239,7 +239,7 @@ impl FtpHelper for Server {
       .await?;
     data_stream.write_all(list.as_bytes()).await?;
     data_stream.shutdown().await?;
-    session.set_finished(true);
+    session.finished = true;
     control.write_all(b"226 Transfer complete.\r\n").await?;
     Ok(())
   }
@@ -252,7 +252,7 @@ impl FtpHelper for Server {
   ) -> Result<(), Box<dyn Error>> {
     let (target_path, mut offset) = {
       let user = user.lock().await;
-      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+      let path = Path::new(&self.root).join(&user.pwd()).join(&file_name);
       let session = user.get_session()?;
       let mut session = session.lock().await;
       session.file_name = file_name.clone();
@@ -299,11 +299,12 @@ impl FtpHelper for Server {
           .await
           .write_all(b"550 Permission denied, the file exists.\r\n")
           .await?;
+        return Ok(());
       }
       if offset > meta.len() {
         offset = meta.len();
       }
-      let mut file = fs::File::open(target_path)?;
+      let mut file = OpenOptions::new().write(true).open(target_path)?;
       file.seek(std::io::SeekFrom::Start(offset))?;
       file
     } else {
@@ -442,7 +443,7 @@ impl FtpServer for Server {
     let (path, offset) = {
       let user = user.lock().await;
 
-      let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+      let path = Path::new(&self.root).join(&user.pwd()).join(&file_name);
       let session = user.get_session()?;
       let mut session = session.lock().await;
       session.file_name = file_name.clone();
@@ -547,7 +548,7 @@ impl FtpServer for Server {
   ) -> Result<(), Box<dyn Error>> {
     let user = user.lock().await;
     // let parts = current_user.pwd.split("/").collect();
-    match fs::create_dir(Path::new(&self.root).join(&user.pwd).join(&dir_name)) {
+    match fs::create_dir(Path::new(&self.root).join(&user.pwd()).join(&dir_name)) {
       Ok(_) => {
         control
           .lock()
@@ -566,7 +567,7 @@ impl FtpServer for Server {
     }
     Ok(())
   }
-  
+
   async fn remove_dir(
     &self,
     control: Arc<Mutex<OwnedWriteHalf>>,
@@ -575,7 +576,7 @@ impl FtpServer for Server {
   ) -> Result<(), Box<dyn Error>> {
     let user = user.lock().await;
     match Path::new(&self.root)
-      .join(&user.pwd)
+      .join(&user.pwd())
       .join(&dir_name)
       .canonicalize()
     {
@@ -627,7 +628,7 @@ impl FtpServer for Server {
     file_name: String,
   ) -> Result<(), Box<dyn Error>> {
     let user = user.lock().await;
-    let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+    let path = Path::new(&self.root).join(&user.pwd()).join(&file_name);
     if !path.exists() {
       control
         .lock()
@@ -671,62 +672,12 @@ impl FtpServer for Server {
     dir_name: String,
   ) -> Result<(), Box<dyn Error>> {
     let mut user = user.lock().await;
-    let dir_name = dir_name.trim_start_matches("/");
-    if dir_name.is_empty() {
-      user.pwd = ".".to_string();
-      control
-        .lock()
-        .await
-        .write_all(b"250 Requested file action okay, completed.\r\n")
-        .await?;
-      return Ok(());
-    } else if dir_name == "." {
-      control
-        .lock()
-        .await
-        .write_all(b"250 PWD not changed.\r\n")
-        .await?;
-      return Ok(());
-    }
-
-    if let Ok(new_path) = Path::new(&self.root)
-      .join(&user.pwd)
-      .join(&dir_name)
-      .canonicalize()
-    {
-      if !new_path.starts_with(&self.root) {
-        control
-          .lock()
-          .await
-          .write_all(b"550 Permission denied.\r\n")
-          .await?;
-      }
-      if !new_path.starts_with(&self.root) {
-        control
-          .lock()
-          .await
-          .write_all(b"550 Permission denied.\r\n")
-          .await?;
-      }
-      user.pwd = match new_path.to_str() {
-        Some(p) => p.to_string(),
-        None => {
-          return Err("Error: path to string failed.".into());
-        }
-      };
-      user.pwd = user.pwd.to_string().replace(&self.root, ".");
-      control
-        .lock()
-        .await
-        .write_all(b"250 Requested file action okay, completed.\r\n")
-        .await?;
-    } else {
-      control
-        .lock()
-        .await
-        .write_all(b"550 Permission denied.\r\n")
-        .await?;
-    }
+    user.cwd(&dir_name)?;
+    control
+      .lock()
+      .await
+      .write_all(b"250 Requested file action okay, completed.\r\n")
+      .await?;
     Ok(())
   }
 
@@ -739,7 +690,13 @@ impl FtpServer for Server {
     control
       .lock()
       .await
-      .write_all(format!("257 \"{}\" is the current directory.\r\n", &user.pwd).as_bytes())
+      .write_all(
+        format!(
+          "257 \"{}\" is the current directory.\r\n",
+          &user.rendering_pwd()
+        )
+        .as_bytes(),
+      )
       .await?;
     Ok(())
   }
@@ -957,7 +914,7 @@ impl FtpServer for Server {
     file_name: String,
   ) -> Result<(), Box<dyn Error>> {
     let user = user.lock().await;
-    let pwd = user.pwd.clone();
+    let pwd = user.pwd();
     let session = user.get_session()?;
     let mut session = session.lock().await;
     let old_path = Path::new(&self.root).join(&pwd).join(&session.file_name);
@@ -1002,7 +959,7 @@ impl FtpServer for Server {
     let mut control = control.lock().await;
     match optional_path {
       Some(path_str) => {
-        let path = Path::new(&self.root).join(&user.pwd).join(&path_str);
+        let path = Path::new(&self.root).join(&user.pwd()).join(&path_str);
         if !path.exists() {
           control.write_all(b"553 Not found.\r\n").await?;
         } else {
@@ -1024,7 +981,7 @@ impl FtpServer for Server {
         let mut content = String::new();
         // content.push_str(format!("Server root: {}\r\n", self.root).as_str());
         content.push_str(format!("User: {}\r\n", user.username).as_str());
-        content.push_str(format!("Current directory: {}\r\n", user.pwd).as_str());
+        content.push_str(format!("Current directory: {}\r\n", user.pwd()).as_str());
         content.push_str(format!("TYPE: {:?}\r\n", user.trans_type).as_str());
         control.write_all(b"211 End of status.\r\n").await?;
       }
@@ -1090,29 +1047,7 @@ impl FtpServer for Server {
     user: Arc<Mutex<User>>,
   ) -> Result<(), Box<dyn Error>> {
     let mut user = user.lock().await;
-    let mut new_path = Path::new(&self.root).join(&user.pwd);
-    if new_path.pop() {
-      let new_path = new_path.canonicalize()?;
-      if new_path.starts_with(&self.root) {
-        user.pwd = new_path
-          .to_str()
-          .unwrap_or(".")
-          .to_string()
-          .replace(&self.root, ".");
-      } else {
-        control
-          .lock()
-          .await
-          .write_all(b"550 Permission denied.\r\n")
-          .await?;
-      }
-    } else {
-      control
-        .lock()
-        .await
-        .write_all(b"550 Permission denied.\r\n")
-        .await?;
-    }
+    user.cwd("..")?;
     control
       .lock()
       .await
@@ -1128,7 +1063,7 @@ impl FtpServer for Server {
     file_name: String,
   ) -> Result<(), Box<dyn Error>> {
     let user = user.lock().await;
-    let path = Path::new(&self.root).join(&user.pwd).join(&file_name);
+    let path = Path::new(&self.root).join(&user.pwd()).join(&file_name);
     if !path.exists() {
       control
         .lock()
