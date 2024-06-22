@@ -226,8 +226,7 @@ impl FtpHelper for Server {
       return Ok(());
     }
 
-    let list =
-      get_list_lines(&path, name_only).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
+    let list = get_list_lines(&path, name_only)?;
 
     let session = user.get_session()?;
     let mut session = session.lock().await;
@@ -382,7 +381,7 @@ fn file_path_to_list_item(path: &PathBuf, name_only: bool) -> Result<String, Box
     .modified()?
     .duration_since(std::time::SystemTime::UNIX_EPOCH)?;
   let file_time = DateTime::from_timestamp(file_time.as_secs() as i64, 0)
-    .unwrap_or_default()
+    .ok_or("Error: failed to convert timestamp.")?
     .with_timezone(&Local)
     .format("%b %d %H:%M")
     .to_string();
@@ -742,9 +741,7 @@ impl FtpServer for Server {
   ) -> Result<(), Box<dyn Error>> {
     let cloned = user.clone();
     let listener = self.generate_pasv_addr().await?;
-    let listen_addr = listener.local_addr().unwrap_or(SocketAddr::from_str(
-      format!("{}:{}", self.host, self.port).as_str(),
-    )?);
+    let listen_addr = listener.local_addr()?;
     let ip = listen_addr.ip().to_string().replace(".", ",");
     let port = listen_addr.port();
 
@@ -967,8 +964,7 @@ impl FtpServer for Server {
           if !path.starts_with(&self.root) {
             control.write_all(b"550 Permission denied.\r\n").await?;
           }
-          let list =
-            get_list_lines(&path, false).unwrap_or_else(|_| "Something wrong.\r\n".to_string());
+          let list = get_list_lines(&path, false)?;
           control
             .write_all(format!("213-Status of {}:\r\n", path_str).as_bytes())
             .await?;
@@ -1085,7 +1081,7 @@ impl FtpServer for Server {
       .modified()?
       .duration_since(std::time::SystemTime::UNIX_EPOCH)?;
     let file_time = DateTime::from_timestamp(file_time.as_secs() as i64, 0)
-      .unwrap_or_default()
+      .ok_or("Error: failed to convert timestamp.")?
       .with_timezone(&Local)
       .format("%Y%m%d%H:%M%S")
       .to_string();
