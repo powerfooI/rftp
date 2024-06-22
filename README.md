@@ -1,8 +1,8 @@
-# RFTP - FTP server written in Rust
+# rFTP - FTP server written in Rust
 
 ## Introduction
 
-RFTP is a simple FTP server written in Rust. It is designed to be a learning project for me to understand the basics and asynchronous I/O in Rust. The project is built on top of the [Tokio](https://tokio.rs/) runtime, which provides asynchronous I/O and networking support.
+`rFTP` is a simple FTP server written in Rust. It is designed to be a learning project for me to understand the basics and asynchronous I/O in Rust. The project is built on top of the [Tokio](https://tokio.rs/) runtime, which provides asynchronous I/O and networking support.
 
 ## Features
 
@@ -35,6 +35,5 @@ RFTP is a simple FTP server written in Rust. It is designed to be a learning pro
 - [epoll](https://man7.org/linux/man-pages/man7/epoll.7.html)
 - [kqueue](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html)
 - [Kernel Queues: An Alternative to File System Events](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html)
-
 - [The Rust Programming Language](https://doc.rust-lang.org/book/title-page.html)
 - [Tokio - An Asynchronous Rust Runtime](https://tokio.rs/)
