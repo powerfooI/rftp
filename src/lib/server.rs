@@ -1,6 +1,7 @@
 use crate::arg_parser::Args;
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ pub struct Server {
   pub host: String,
   pub port: u16,
   pub root: String,
-  pub listener: Arc<Mutex<TcpListener>>,
+  pub listener: Arc<TcpListener>,
   pub user_map: Arc<Mutex<HashMap<SocketAddr, Arc<Mutex<User>>>>>,
 }
 
@@ -32,9 +33,12 @@ impl Server {
       root: Path::new(cfg.folder.as_str())
         .canonicalize()?
         .to_str()
-        .unwrap()
+        .ok_or(io::Error::new(
+          io::ErrorKind::NotFound,
+          "Failed to get root path",
+        ))?
         .to_string(),
-      listener: Arc::new(Mutex::new(listener)),
+      listener: Arc::new(listener),
       user_map: Arc::new(Mutex::new(HashMap::new())),
     })
   }
@@ -42,9 +46,8 @@ impl Server {
   pub async fn listen(&self) {
     println!("Listening on {}:{}", self.host, self.port);
     println!("Root folder: {}", self.root);
-    // todo: token pool and idle pool
     loop {
-      if let Ok((socket, addr)) = self.listener.lock().await.accept().await {
+      if let Ok((socket, addr)) = self.listener.accept().await {
         let shared_self = self.clone();
         tokio::spawn(async move {
           shared_self.handle(socket, addr).await;
